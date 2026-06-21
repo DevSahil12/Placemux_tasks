@@ -4,6 +4,7 @@ conn = sqlite3.connect("placemux.db")
 cur = conn.cursor()
 
 cur.executescript("""
+DROP TABLE IF EXISTS application_events;
 DROP TABLE IF EXISTS job_view_events;
 DROP TABLE IF EXISTS job_search_events;
 DROP TABLE IF EXISTS job_supply_events;
@@ -49,6 +50,7 @@ CREATE TABLE applications (
     job_id         INTEGER,
     applied_at     TEXT,
     status         TEXT,
+    verified       INTEGER DEFAULT 0,   -- 1 = passed skill-threshold check at apply time
     FOREIGN KEY (student_id) REFERENCES students(student_id),
     FOREIGN KEY (job_id)     REFERENCES jobs(job_id)
 );
@@ -114,6 +116,26 @@ CREATE TABLE job_view_events (
     viewed_at     TEXT,
     FOREIGN KEY (student_id) REFERENCES students(student_id),
     FOREIGN KEY (job_id)     REFERENCES jobs(job_id)
+);
+
+-- ── TASK 4: Applications & Shortlisting ────────────────────────────────────
+-- Immutable event log — every status change in an application's life fires
+-- a row here. The applications table holds *current* state; this table
+-- holds the *history* the funnel and freshness checks are built on.
+CREATE TABLE application_events (
+    app_event_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    application_id  INTEGER,
+    student_id      INTEGER,
+    job_id          INTEGER,
+    company_id      INTEGER,
+    event_name      TEXT,     -- application_submitted | application_verified |
+                              -- application_rejected_unverified | application_shortlisted
+    verified        INTEGER,  -- 1/0 — did the student meet the job's min_cgpa at this event
+    emitted_at      TEXT,
+    FOREIGN KEY (application_id) REFERENCES applications(application_id),
+    FOREIGN KEY (student_id)     REFERENCES students(student_id),
+    FOREIGN KEY (job_id)         REFERENCES jobs(job_id),
+    FOREIGN KEY (company_id)     REFERENCES companies(company_id)
 );
 """)
 

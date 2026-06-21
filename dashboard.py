@@ -28,7 +28,7 @@ st.markdown(f"""
 </div>""", unsafe_allow_html=True)
 
 tabs = st.tabs(["🏠 Overview", "📦 Job Supply (Task 2)", "🏢 Company Funnel (Task 3)",
-                "🔍 Validation", "📋 Raw Data"])
+                "📝 Application Funnel (Task 4)", "🔍 Validation", "📋 Raw Data"])
 
 # ═══════════════════════════════════════════════════════
 # TAB 1 — OVERVIEW (Task 1 metrics)
@@ -409,9 +409,123 @@ with tabs[2]:
 
 
 # ═══════════════════════════════════════════════════════
-# TAB 4 — VALIDATION (Task 2 + Task 3 checks)
+# TAB 4 — APPLICATION FUNNEL (Task 4 centrepiece)
 # ═══════════════════════════════════════════════════════
 with tabs[3]:
+    st.subheader("Application Funnel — Applications & Shortlisting")
+    st.caption("Submitted → Verified/Rejected → Shortlisted → Interviewed → Offered. "
+               "Built from application_events (immutable log) — every application is "
+               "checked against the job's skill threshold (min_cgpa) at submit time. "
+               "Only verified candidates can ever be shortlisted; this is enforced in "
+               "code (emit_shortlist), not just convention.")
+
+    funnel_agg = q("""
+        SELECT
+            COUNT(*) submitted,
+            SUM(CASE WHEN verified=1 THEN 1 ELSE 0 END) verified,
+            SUM(CASE WHEN verified=0 THEN 1 ELSE 0 END) rejected,
+            SUM(CASE WHEN status='Shortlisted' THEN 1 ELSE 0 END) shortlisted,
+            SUM(CASE WHEN status='Interviewed' THEN 1 ELSE 0 END) interviewed,
+            SUM(CASE WHEN status='Offered' THEN 1 ELSE 0 END) offered
+        FROM applications
+    """).iloc[0]
+
+    c1,c2,c3,c4,c5,c6 = st.columns(6)
+    c1.metric("📝 Submitted", int(funnel_agg["submitted"]))
+    c2.metric("✅ Verified", int(funnel_agg["verified"]))
+    c3.metric("❌ Rejected", int(funnel_agg["rejected"]))
+    c4.metric("⭐ Shortlisted", int(funnel_agg["shortlisted"]))
+    c5.metric("🗣️ Interviewed", int(funnel_agg["interviewed"]))
+    c6.metric("🏆 Offered", int(funnel_agg["offered"]))
+
+    verification_rate = round(funnel_agg["verified"] / funnel_agg["submitted"] * 100, 1)
+    shortlist_of_verified = round(funnel_agg["shortlisted"] / max(funnel_agg["verified"],1) * 100, 1)
+
+    c7, c8 = st.columns(2)
+    c7.metric("Verification Pass Rate", f"{verification_rate}%",
+              help="% of submitted applications where the student met the job's min_cgpa "
+                   "threshold. Low rate -> search is surfacing jobs to unqualified students "
+                   "-> fix fit-ranking, not the threshold.")
+    c8.metric("Shortlist Rate (of Verified)", f"{shortlist_of_verified}%",
+              help="% of verified applications that got shortlisted. Tells a company "
+                   "whether their job is competitive once only qualified candidates are counted.")
+
+    st.divider()
+
+    funnel_df = pd.DataFrame({
+        "stage": ["Submitted","Verified","Shortlisted","Interviewed","Offered"],
+        "count": [funnel_agg["submitted"], funnel_agg["verified"],
+                 funnel_agg["shortlisted"], funnel_agg["interviewed"], funnel_agg["offered"]]
+    })
+    fig_af = go.Figure(go.Funnel(
+        y=funnel_df["stage"], x=funnel_df["count"],
+        textinfo="value+percent initial",
+        marker=dict(color=["#1e2761","#3b5bdb","#a5b4fc","#fbbf24","#22c55e"])
+    ))
+    fig_af.update_layout(title="Aggregate Application Funnel (verified path only)", height=380,
+                         margin=dict(t=40,b=10))
+    st.plotly_chart(fig_af, use_container_width=True)
+
+    st.divider()
+    col_i1, col_i2 = st.columns(2)
+    with col_i1:
+        st.subheader("⚠️ Shortlist Integrity Check")
+        violation = q("SELECT COUNT(*) n FROM applications WHERE status='Shortlisted' AND verified=0").iloc[0,0]
+        if violation == 0:
+            st.success(f"✅ PASS — 0 unverified candidates have ever been shortlisted. "
+                       f"Integrity enforced at write time, not just monitored after the fact.")
+        else:
+            st.error(f"🔴 FAIL — {violation} unverified candidates were shortlisted. Investigate immediately.")
+
+    with col_i2:
+        st.subheader("Verification Outcome Split")
+        outcome_df = pd.DataFrame({
+            "outcome": ["Verified", "Rejected (below threshold)"],
+            "count": [funnel_agg["verified"], funnel_agg["rejected"]]
+        })
+        fig_out = px.pie(outcome_df, names="outcome", values="count",
+                         color_discrete_sequence=["#22c55e","#ef4444"])
+        fig_out.update_layout(height=260, margin=dict(t=10,b=10))
+        st.plotly_chart(fig_out, use_container_width=True)
+
+    st.divider()
+    st.subheader("Per-Job Verification & Shortlist Rates")
+    st.caption("Where a job's min_cgpa is filtering out most applicants — "
+               "a company-actionable view, not just a vanity number.")
+    per_job = q("""
+        SELECT j.job_title, j.min_cgpa,
+               COUNT(a.application_id) submitted,
+               SUM(CASE WHEN a.verified=1 THEN 1 ELSE 0 END) verified,
+               SUM(CASE WHEN a.status='Shortlisted' THEN 1 ELSE 0 END) shortlisted,
+               ROUND(100.0*SUM(CASE WHEN a.verified=1 THEN 1 ELSE 0 END)/COUNT(a.application_id),1) verify_pct
+        FROM jobs j JOIN applications a ON j.job_id=a.job_id
+        GROUP BY j.job_id HAVING submitted >= 3
+        ORDER BY submitted DESC LIMIT 15
+    """)
+    fig_job = px.bar(per_job, x="job_title", y=["verified","submitted"],
+                     barmode="overlay", title="Verified vs Submitted by Job (top 15 by volume)",
+                     color_discrete_sequence=["#22c55e","#cadcfc"])
+    fig_job.update_layout(height=360, margin=dict(t=40,b=10))
+    st.plotly_chart(fig_job, use_container_width=True)
+    st.dataframe(per_job, use_container_width=True, height=280)
+
+    st.subheader("Recent Application Events (live)")
+    recent = q("""
+        SELECT e.emitted_at, st.student_name, j.job_title, c.company_name,
+               e.event_name, CASE WHEN e.verified=1 THEN 'Yes' ELSE 'No' END AS verified
+        FROM application_events e
+        JOIN students st ON e.student_id=st.student_id
+        JOIN jobs j ON e.job_id=j.job_id
+        JOIN companies c ON e.company_id=c.company_id
+        ORDER BY e.emitted_at DESC LIMIT 25
+    """)
+    st.dataframe(recent, use_container_width=True, height=320)
+
+
+# ═══════════════════════════════════════════════════════
+# TAB 5 — VALIDATION (Task 2 + Task 3 + Task 4 checks)
+# ═══════════════════════════════════════════════════════
+with tabs[4]:
     st.subheader("Job Supply Event Validation — All Checks")
 
     STATUS_COLOR = {"PASS":"#22c55e","WARN":"#f59e0b","FAIL":"#ef4444"}
@@ -509,11 +623,58 @@ with tabs[3]:
     else:
         st.warning("⚠️ Review warnings above before the live demo.")
 
+    st.divider()
+    st.subheader("Task 4 — Application Funnel Validation")
+
+    n_apps_v   = q("SELECT COUNT(*) n FROM applications").iloc[0,0]
+    n_events_v = q("SELECT COUNT(*) n FROM application_events").iloc[0,0]
+    t1 = "PASS" if n_apps_v > 100 and n_events_v > 200 else "FAIL"
+    st.markdown(f'**Check 1 — Real data flowing (applications & events)** {badge(t1)}', unsafe_allow_html=True)
+    st.caption(f"applications: {n_apps_v} | application_events: {n_events_v}")
+
+    last_app_event = q("SELECT MAX(emitted_at) ts FROM application_events").iloc[0,0]
+    hrs2 = (dt.datetime.now() - dt.datetime.strptime(last_app_event, "%Y-%m-%d %H:%M:%S")).total_seconds()/3600
+    t2 = "PASS" if hrs2 < 48 else "FAIL"
+    st.markdown(f'**Check 2 — Freshness (SLA: < 48h)** {badge(t2)}', unsafe_allow_html=True)
+    st.caption(f"Last event: {last_app_event} ({hrs2:.1f}h ago)")
+
+    null_apps = q("""
+        SELECT SUM(CASE WHEN student_id IS NULL THEN 1 ELSE 0 END) +
+               SUM(CASE WHEN job_id IS NULL THEN 1 ELSE 0 END) +
+               SUM(CASE WHEN event_name IS NULL THEN 1 ELSE 0 END) +
+               SUM(CASE WHEN verified IS NULL THEN 1 ELSE 0 END) n
+        FROM application_events
+    """).iloc[0,0]
+    t3 = "PASS" if null_apps == 0 else "WARN"
+    st.markdown(f'**Check 3 — Required fields populated** {badge(t3)}', unsafe_allow_html=True)
+    st.caption(f"Nulls found: {null_apps}")
+
+    dup_apps = q("""
+        SELECT COUNT(*) n FROM (
+            SELECT application_id, event_name, COUNT(*) c
+            FROM application_events GROUP BY application_id, event_name HAVING c > 1)
+    """).iloc[0,0]
+    t4 = "PASS" if dup_apps == 0 else "WARN"
+    st.markdown(f'**Check 4 — No duplicate events per application** {badge(t4)}', unsafe_allow_html=True)
+    st.caption(f"Duplicates: {dup_apps}")
+
+    integrity_violation = q("SELECT COUNT(*) n FROM applications WHERE status='Shortlisted' AND verified=0").iloc[0,0]
+    t5 = "PASS" if integrity_violation == 0 else "FAIL"
+    st.markdown(f'**Check 5 — Shortlist integrity (no unverified candidate ever shortlisted)** {badge(t5)}',
+                unsafe_allow_html=True)
+    st.caption(f"Violations: {integrity_violation}")
+
+    if t1=="PASS" and t2=="PASS" and t5=="PASS":
+        st.success("✅ Critical checks PASS — application funnel is real, sourced, and verification-gated.")
+    else:
+        st.warning("⚠️ Review warnings above before the live demo.")
+
 
 # ═══════════════════════════════════════════════════════
-# TAB 5 — RAW DATA
+# TAB 6 — RAW DATA
 # ═══════════════════════════════════════════════════════
-with tabs[4]:
+with tabs[5]:
     table = st.selectbox("Table", ["applications","jobs","students","companies","interviews",
-                                   "offers","job_supply_events","job_search_events","job_view_events"])
+                                   "offers","job_supply_events","job_search_events",
+                                   "job_view_events","application_events"])
     st.dataframe(q(f"SELECT * FROM {table}"), use_container_width=True, height=500)
