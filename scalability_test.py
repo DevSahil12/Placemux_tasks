@@ -216,6 +216,16 @@ BENCHMARK_QUERIES = {
         FROM applications""",
     "Shortlist integrity check": """
         SELECT COUNT(*) FROM applications WHERE status='Shortlisted' AND verified=0""",
+    "Liquidity index inputs": """
+        SELECT
+            (SELECT COUNT(*) FROM jobs WHERE status='open') active_listings,
+            (SELECT COUNT(*) FROM job_search_events WHERE clicked_job_id IS NOT NULL)*100.0 /
+            MAX((SELECT COUNT(*) FROM job_search_events),1) search_to_view_rate,
+            (SELECT SUM(CASE WHEN status IN ('Shortlisted','Interviewed','Offered') THEN 1.0 ELSE 0 END) /
+             MAX(SUM(CASE WHEN verified=1 THEN 1.0 ELSE 0 END),1)*100
+             FROM applications) apply_shortlist_rate,
+            (SELECT SUM(CASE WHEN verified=1 THEN 1.0 ELSE 0 END) /
+             MAX(COUNT(*),1)*100 FROM applications) verification_rate""",
 }
 
 SCALES = [

@@ -1,11 +1,13 @@
 """
 PlaceMux Analytics Dashboard
-Task 1 (Marketplace Health) + Task 2 (Job Supply) + Task 3 (Search & Discovery / Company Funnel)
+Tasks 1–5: Marketplace Health, Job Supply, Company Funnel,
+Application Funnel, Liquidity Dashboard
 Run: streamlit run dashboard.py
 """
 import streamlit as st
 import sqlite3, pandas as pd, plotly.express as px, plotly.graph_objects as go
 import datetime as dt, os
+from liquidity_engine import compute, health_status, METRIC_DICTIONARY
 
 DB = os.path.join(os.path.dirname(__file__), "placemux.db")
 TODAY = dt.datetime.now()
@@ -19,21 +21,181 @@ def q(sql):
     conn.close()
     return df
 
+@st.cache_data(ttl=30)
+def get_metrics():
+    return compute(DB)
+
 # ── header ──────────────────────────────────────────────────────────────────
 st.markdown(f"""
 <div style='background:linear-gradient(90deg,#1e2761,#3b5bdb);padding:1.2rem 2rem;
             border-radius:12px;margin-bottom:1.2rem'>
   <h1 style='color:#fff;margin:0;font-size:1.8rem'>📊 PlaceMux Marketplace Dashboard</h1>
-  <p style='color:#cadcfc;margin:0.25rem 0 0'>Phase 2 · Week 2 · Task 1, 2 & 3 &nbsp;|&nbsp; As of {TODAY.strftime('%d %b %Y')}</p>
+  <p style='color:#cadcfc;margin:0.25rem 0 0'>Phase 2 · Week 2 · Tasks 1–5 &nbsp;|&nbsp; As of {TODAY.strftime('%d %b %Y')}</p>
 </div>""", unsafe_allow_html=True)
 
-tabs = st.tabs(["🏠 Overview", "📦 Job Supply (Task 2)", "🏢 Company Funnel (Task 3)",
-                "📝 Application Funnel (Task 4)", "🔍 Validation", "📋 Raw Data"])
+tabs = st.tabs(["💧 Liquidity (Task 5)", "🏠 Overview", "📦 Job Supply (Task 2)",
+                "🏢 Company Funnel (Task 3)", "📝 Application Funnel (Task 4)",
+                "🔍 Validation", "📋 Raw Data"])
+
+# ═══════════════════════════════════════════════════════
+# TAB 0 — LIQUIDITY DASHBOARD (Task 5 centrepiece)
+# ═══════════════════════════════════════════════════════
+with tabs[0]:
+    metrics = get_metrics()
+    li      = metrics["liquidity_index"]
+    label, li_color, action = health_status(li)
+
+    # ── hero: Liquidity Index ─────────────────────────────
+    st.markdown(
+        f'<div style="background:{li_color}22;border-left:6px solid {li_color};'
+        f'padding:1rem 1.5rem;border-radius:8px;margin-bottom:1rem">'
+        f'<span style="font-size:2.2rem;font-weight:700;color:{li_color}">'
+        f'{li}/100</span>'
+        f'<span style="font-size:1.1rem;font-weight:600;color:{li_color};margin-left:1rem">'
+        f'[{label}]</span><br>'
+        f'<span style="font-size:0.95rem;color:#444">{action}</span>'
+        f'</div>',
+        unsafe_allow_html=True
+    )
+
+    def fmt(v, suffix=""):
+        if v is None: return "N/A"
+        if isinstance(v, float): return f"{v:.1f}{suffix}"
+        return f"{v}{suffix}"
+
+    # ── gauge ────────────────────────────────────────────
+    col_g, col_components = st.columns([1, 2])
+    with col_g:
+        fig_gauge = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=li,
+            title={"text": "Liquidity Index", "font": {"size": 17}},
+            gauge={
+                "axis": {"range": [0, 100]},
+                "bar": {"color": li_color},
+                "steps": [
+                    {"range": [0, 50],  "color": "#fee2e2"},
+                    {"range": [50, 70], "color": "#fef9c3"},
+                    {"range": [70, 100],"color": "#dcfce7"},
+                ],
+                "threshold": {"line": {"color": "#1e2761","width": 3},"value": li}
+            }
+        ))
+        fig_gauge.update_layout(height=260, margin=dict(t=30,b=10,l=20,r=20))
+        st.plotly_chart(fig_gauge, use_container_width=True)
+
+    with col_components:
+        st.markdown("**Component Breakdown**")
+        components = {
+            "Fill Proxy (apply→shortlist) 35%": metrics["apply_to_shortlist_rate"],
+            "Supply Health (active listings) 30%": min(metrics["active_listings"]/300*100,100),
+            "Discovery (search→view rate) 20%": metrics["search_to_view_rate"],
+            "Verification Quality 15%": metrics["verification_pass_rate"],
+        }
+        comp_df = pd.DataFrame({"Component":list(components.keys()),
+                                 "Score":[round(v,1) for v in components.values()]})
+        fig_comp = px.bar(comp_df, x="Score", y="Component", orientation="h",
+                          color="Score", range_color=[0,100],
+                          color_continuous_scale=["#fee2e2","#fef9c3","#dcfce7"])
+        fig_comp.add_vline(x=70, line_dash="dash", line_color="#888",
+                           annotation_text="Target 70")
+        fig_comp.update_layout(height=240,margin=dict(t=10,b=10),coloraxis_showscale=False)
+        st.plotly_chart(fig_comp, use_container_width=True)
+
+    st.divider()
+
+    # ── four metric groups ────────────────────────────────
+    st.subheader("📦 Supply Health")
+    s1,s2,s3,s4 = st.columns(4)
+    s1.metric("Active Listings",     fmt(metrics["active_listings"]),
+              help=METRIC_DICTIONARY["active_listings"]["decision"])
+    s2.metric("Jobs Posted (7d)",    fmt(metrics["jobs_posted_last_7d"]),
+              help=METRIC_DICTIONARY["jobs_posted_last_7d"]["decision"])
+    s3.metric("Avg Min CGPA",        fmt(metrics["avg_min_cgpa_threshold"]),
+              help=METRIC_DICTIONARY["avg_min_cgpa_threshold"]["decision"])
+    s4.metric("Supply WoW Growth",
+              fmt(metrics["supply_growth_wow"], "%") if metrics["supply_growth_wow"] is not None else "N/A",
+              help=METRIC_DICTIONARY["supply_growth_wow"]["decision"])
+
+    st.subheader("🔍 Discovery")
+    d1,d2,d3,d4 = st.columns(4)
+    d1.metric("Search→View Rate",   fmt(metrics["search_to_view_rate"], "%"),
+              help=METRIC_DICTIONARY["search_to_view_rate"]["decision"])
+    d2.metric("Search Latency p95", fmt(metrics["search_latency_p95"], "ms"),
+              help=METRIC_DICTIONARY["search_latency_p95"]["decision"])
+    d3.metric("Zero Result Rate",   fmt(metrics["zero_result_rate"], "%"),
+              help=METRIC_DICTIONARY["zero_result_rate"]["decision"])
+    d4.metric("Avg Fit Score",      fmt(metrics["avg_fit_score"], "/100"),
+              help=METRIC_DICTIONARY["avg_fit_score"]["decision"])
+
+    st.subheader("📝 Application Funnel")
+    a1,a2,a3,a4 = st.columns(4)
+    a1.metric("Verification Pass Rate",    fmt(metrics["verification_pass_rate"], "%"),
+              help=METRIC_DICTIONARY["verification_pass_rate"]["decision"])
+    a2.metric("Apply→Shortlist Rate",      fmt(metrics["apply_to_shortlist_rate"], "%"),
+              help=METRIC_DICTIONARY["apply_to_shortlist_rate"]["decision"])
+    a3.metric("Shortlist→Interview Rate",  fmt(metrics["shortlist_to_interview_rate"], "%"),
+              help=METRIC_DICTIONARY["shortlist_to_interview_rate"]["decision"])
+    a4.metric("Interview→Offer Rate",      fmt(metrics["interview_to_offer_rate"], "%"),
+              help=METRIC_DICTIONARY["interview_to_offer_rate"]["decision"])
+
+    st.subheader("🛡️ Integrity")
+    i1, i2 = st.columns(2)
+    si = metrics["shortlist_integrity"]
+    i1.metric("Shortlist Integrity", fmt(si, "%"),
+              help=METRIC_DICTIONARY["shortlist_integrity"]["decision"])
+    if si == 100.0:
+        i2.success("✅ No unverified candidate ever shortlisted")
+    else:
+        i2.error(f"🔴 {100-si:.1f}% of shortlists breached integrity — investigate immediately")
+
+    st.divider()
+
+    # ── end-to-end chain bar chart ────────────────────────
+    st.subheader("End-to-End Flow: Company Posts → Student Applies → Company Shortlists")
+    chain_df = pd.DataFrame({
+        "stage": ["Posted","Viewed","Applied","Verified","Shortlisted","Interviewed","Offered"],
+        "count": [
+            q("SELECT COUNT(*) n FROM job_supply_events").iloc[0,0],
+            q("SELECT COUNT(*) n FROM job_view_events").iloc[0,0],
+            q("SELECT COUNT(*) n FROM applications").iloc[0,0],
+            q("SELECT COUNT(*) n FROM applications WHERE verified=1").iloc[0,0],
+            q("SELECT COUNT(*) n FROM applications WHERE status IN ('Shortlisted','Interviewed','Offered')").iloc[0,0],
+            q("SELECT COUNT(*) n FROM applications WHERE status IN ('Interviewed','Offered')").iloc[0,0],
+            q("SELECT COUNT(*) n FROM applications WHERE status='Offered'").iloc[0,0],
+        ]
+    })
+    fig_chain = go.Figure(go.Funnel(
+        y=chain_df["stage"], x=chain_df["count"],
+        textinfo="value+percent initial",
+        marker=dict(color=["#1e2761","#3b5bdb","#6b8cfa","#a5b4fc",
+                           "#fbbf24","#fb923c","#22c55e"])
+    ))
+    fig_chain.update_layout(title="Full Marketplace Funnel (real data — every stage sourced from events)",
+                            height=420, margin=dict(t=40,b=10))
+    st.plotly_chart(fig_chain, use_container_width=True)
+
+    st.divider()
+
+    # ── metric dictionary ─────────────────────────────────
+    st.subheader("📖 Metric Dictionary — every number, its source, its decision")
+    st.caption("If a number can't be traced to a source and forward to a decision, it doesn't appear here.")
+    rows = []
+    for name, defn in METRIC_DICTIONARY.items():
+        rows.append({
+            "Metric": name,
+            "Live Value": fmt(metrics.get(name)),
+            "Definition": defn["definition"][:80],
+            "Source": defn["source"],
+            "Decision": defn["decision"][:90],
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, height=480)
+
 
 # ═══════════════════════════════════════════════════════
 # TAB 1 — OVERVIEW (Task 1 metrics)
 # ═══════════════════════════════════════════════════════
-with tabs[0]:
+with tabs[1]:
 
     # ── top KPI cards ────────────────────────────────────
     total_companies = q("SELECT COUNT(*) n FROM companies").iloc[0,0]
@@ -155,7 +317,7 @@ with tabs[0]:
 # ═══════════════════════════════════════════════════════
 # TAB 2 — JOB SUPPLY (Task 2 centrepiece)
 # ═══════════════════════════════════════════════════════
-with tabs[1]:
+with tabs[2]:
     st.subheader("Job Supply Instrumentation — Live View")
     st.caption("Every row below comes from a `job_posted` event in the `job_supply_events` table. "
                "This view is the Task 2 deliverable — events validated, jobs-posted view live.")
@@ -265,7 +427,7 @@ with tabs[1]:
 # ═══════════════════════════════════════════════════════
 # TAB 3 — COMPANY FUNNEL (Task 3 centrepiece)
 # ═══════════════════════════════════════════════════════
-with tabs[2]:
+with tabs[3]:
     st.subheader("Company Funnel — Search & Discovery")
     st.caption("Posted → Viewed → Applied → Shortlisted → Interviewed → Offered, "
                "built from job_supply_events, job_view_events, applications, "
@@ -411,7 +573,7 @@ with tabs[2]:
 # ═══════════════════════════════════════════════════════
 # TAB 4 — APPLICATION FUNNEL (Task 4 centrepiece)
 # ═══════════════════════════════════════════════════════
-with tabs[3]:
+with tabs[4]:
     st.subheader("Application Funnel — Applications & Shortlisting")
     st.caption("Submitted → Verified/Rejected → Shortlisted → Interviewed → Offered. "
                "Built from application_events (immutable log) — every application is "
@@ -525,7 +687,7 @@ with tabs[3]:
 # ═══════════════════════════════════════════════════════
 # TAB 5 — VALIDATION (Task 2 + Task 3 + Task 4 checks)
 # ═══════════════════════════════════════════════════════
-with tabs[4]:
+with tabs[5]:
     st.subheader("Job Supply Event Validation — All Checks")
 
     STATUS_COLOR = {"PASS":"#22c55e","WARN":"#f59e0b","FAIL":"#ef4444"}
@@ -669,11 +831,53 @@ with tabs[4]:
     else:
         st.warning("⚠️ Review warnings above before the live demo.")
 
+    st.divider()
+    st.subheader("Task 5 — Liquidity Dashboard Validation")
+
+    EXPECTED = {
+        "job_supply_events": 50, "job_search_events": 200,
+        "job_view_events": 100, "applications": 200, "application_events": 400,
+    }
+    all_ok = True
+    for tbl, min_rows in EXPECTED.items():
+        n = q(f"SELECT COUNT(*) n FROM {tbl}").iloc[0,0]
+        ok = n >= min_rows
+        color = "#22c55e" if ok else "#ef4444"
+        st.markdown(
+            f'<div style="border-left:3px solid {color};padding:2px 12px;margin:2px 0;font-size:13px">'
+            f'<code>{tbl}</code> — {n} rows (min {min_rows}) '
+            f'{"✓" if ok else "✗"}</div>', unsafe_allow_html=True)
+        if not ok: all_ok = False
+
+    liq_m = get_metrics()
+    liq_v = liq_m["liquidity_index"]
+    liq_label, liq_col, liq_act = health_status(liq_v)
+    liq_ok = liq_v is not None
+    st.markdown(f'**Liquidity Index computable** {"✅" if liq_ok else "❌"}', unsafe_allow_html=True)
+    st.caption(f"Value: {liq_v}/100 [{liq_label}] — {liq_act}")
+
+    chain_ok = all(
+        q(f"SELECT COUNT(*) n FROM {tbl}").iloc[0,0] > 0
+        for tbl in ["job_supply_events","job_view_events","applications"]
+    )
+    st.markdown(f'**End-to-end chain (post→view→apply) data present** {"✅" if chain_ok else "❌"}',
+                unsafe_allow_html=True)
+
+    integrity_v = q("SELECT COUNT(*) n FROM applications WHERE status='Shortlisted' AND verified=0").iloc[0,0]
+    st.markdown(f'**Shortlist integrity** {"✅" if integrity_v==0 else "❌"}', unsafe_allow_html=True)
+    st.caption(f"Violations: {integrity_v}")
+
+    if all_ok and liq_ok and chain_ok and integrity_v == 0:
+        st.success("✅ ALL CHECKS PASS — Liquidity dashboard is real, sourced, "
+                   "end-to-end, and demoable. Week-2 hand-off ready.")
+    else:
+        st.warning("⚠️ Review above before submitting.")
+
 
 # ═══════════════════════════════════════════════════════
-# TAB 6 — RAW DATA
+# TAB 7 — RAW DATA
 # ═══════════════════════════════════════════════════════
-with tabs[5]:
+with tabs[6]:
     table = st.selectbox("Table", ["applications","jobs","students","companies","interviews",
                                    "offers","job_supply_events","job_search_events",
                                    "job_view_events","application_events"])
