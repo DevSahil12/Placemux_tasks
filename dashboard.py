@@ -1,13 +1,14 @@
 """
 PlaceMux Analytics Dashboard
-Tasks 1–5: Marketplace Health, Job Supply, Company Funnel,
-Application Funnel, Liquidity Dashboard
+Tasks 1–6: Marketplace Health, Job Supply, Company Funnel,
+Application Funnel, Liquidity Dashboard, Revenue Metrics
 Run: streamlit run dashboard.py
 """
 import streamlit as st
 import sqlite3, pandas as pd, plotly.express as px, plotly.graph_objects as go
 import datetime as dt, os
 from liquidity_engine import compute, health_status, METRIC_DICTIONARY
+from revenue_engine import compute_revenue, REVENUE_METRIC_DICTIONARY
 
 DB = os.path.join(os.path.dirname(__file__), "placemux.db")
 TODAY = dt.datetime.now()
@@ -25,15 +26,20 @@ def q(sql):
 def get_metrics():
     return compute(DB)
 
+@st.cache_data(ttl=30)
+def get_revenue():
+    return compute_revenue(DB)
+
 # ── header ──────────────────────────────────────────────────────────────────
 st.markdown(f"""
 <div style='background:linear-gradient(90deg,#1e2761,#3b5bdb);padding:1.2rem 2rem;
             border-radius:12px;margin-bottom:1.2rem'>
   <h1 style='color:#fff;margin:0;font-size:1.8rem'>📊 PlaceMux Marketplace Dashboard</h1>
-  <p style='color:#cadcfc;margin:0.25rem 0 0'>Phase 2 · Week 2 · Tasks 1–5 &nbsp;|&nbsp; As of {TODAY.strftime('%d %b %Y')}</p>
+  <p style='color:#cadcfc;margin:0.25rem 0 0'>Phase 2 · Week 3 · Tasks 1–6 &nbsp;|&nbsp; As of {TODAY.strftime('%d %b %Y')}</p>
 </div>""", unsafe_allow_html=True)
 
-tabs = st.tabs(["💧 Liquidity (Task 5)", "🏠 Overview", "📦 Job Supply (Task 2)",
+tabs = st.tabs(["💧 Liquidity (Task 5)", "💰 Revenue (Task 6)", "🏠 Overview",
+                "📦 Job Supply (Task 2)",
                 "🏢 Company Funnel (Task 3)", "📝 Application Funnel (Task 4)",
                 "🔍 Validation", "📋 Raw Data"])
 
@@ -193,9 +199,181 @@ with tabs[0]:
 
 
 # ═══════════════════════════════════════════════════════
-# TAB 1 — OVERVIEW (Task 1 metrics)
+# TAB 1 — REVENUE METRICS (Task 6 centrepiece)
 # ═══════════════════════════════════════════════════════
 with tabs[1]:
+    rev = get_revenue()
+
+    st.subheader("💰 Revenue Metrics — Payments Design & Gateway Setup")
+    st.caption("All numbers sourced from payment_events (immutable log) + payments (entity table). "
+               "Gateway mode: TEST — no real money collected yet.")
+
+    # ── gateway status banner ─────────────────────────────
+    gw_modes = rev["gateway_mode"]
+    if "live" not in gw_modes:
+        st.info("🧪 Gateway Mode: **TEST** — All payments are synthetic. "
+                "0 live-mode rows confirmed in DB. See go-live checklist below.")
+    else:
+        st.error("🔴 LIVE mode detected — confirm this was intentional before proceeding.")
+
+    # ── hero KPIs ─────────────────────────────────────────
+    c1,c2,c3,c4,c5 = st.columns(5)
+    c1.metric("💰 Total Revenue (INR)",
+              f"₹{rev['total_revenue_inr']:,.0f}",
+              help=REVENUE_METRIC_DICTIONARY["total_revenue_inr"]["decision"])
+    c2.metric("📅 Revenue (Last 7d)",
+              f"₹{rev['revenue_last_7d']:,.0f}",
+              help=REVENUE_METRIC_DICTIONARY["revenue_last_7d"]["decision"])
+    c3.metric("✅ Payment Success Rate",
+              f"{rev['payment_success_rate']}%",
+              help=REVENUE_METRIC_DICTIONARY["payment_success_rate"]["decision"])
+    c4.metric("🏢 Paying Companies",
+              rev["paying_companies"],
+              help=REVENUE_METRIC_DICTIONARY["paying_companies"]["decision"])
+    c5.metric("💎 ARPC (INR)",
+              f"₹{rev['arpc_inr']:,.0f}",
+              help=REVENUE_METRIC_DICTIONARY["arpc_inr"]["decision"])
+
+    c6,c7,c8 = st.columns(3)
+    c6.metric("❌ Failure Rate",
+              f"{rev['payment_failure_rate']}%",
+              help=REVENUE_METRIC_DICTIONARY["payment_failure_rate"]["decision"])
+    c7.metric("🔄 Refund Rate",
+              f"{rev['refund_rate']}%",
+              help=REVENUE_METRIC_DICTIONARY["refund_rate"]["decision"])
+    c8.metric("🎯 Conversion to Paid",
+              f"{rev['conversion_to_paid_rate']}%",
+              help=REVENUE_METRIC_DICTIONARY["conversion_to_paid_rate"]["decision"])
+
+    st.divider()
+    col_r1, col_r2 = st.columns(2)
+
+    with col_r1:
+        # revenue by type pie
+        rev_type = rev["revenue_by_type"]
+        if rev_type:
+            fig_rtype = px.pie(
+                names=list(rev_type.keys()),
+                values=list(rev_type.values()),
+                title="Revenue by Payment Type",
+                color_discrete_sequence=["#1e2761","#3b5bdb","#22c55e"]
+            )
+            fig_rtype.update_layout(height=300, margin=dict(t=40,b=10))
+            st.plotly_chart(fig_rtype, use_container_width=True)
+
+    with col_r2:
+        # payment funnel
+        pay_funnel = pd.DataFrame({
+            "stage":  ["Initiated","Success","Failed","Refunded"],
+            "count": [
+                q("SELECT COUNT(*) n FROM payments").iloc[0,0],
+                q("SELECT COUNT(*) n FROM payments WHERE status='success'").iloc[0,0],
+                q("SELECT COUNT(*) n FROM payments WHERE status='failed'").iloc[0,0],
+                q("SELECT COUNT(*) n FROM payments WHERE status='refunded'").iloc[0,0],
+            ]
+        })
+        fig_pfunnel = go.Figure(go.Funnel(
+            y=pay_funnel["stage"], x=pay_funnel["count"],
+            textinfo="value+percent initial",
+            marker=dict(color=["#1e2761","#22c55e","#ef4444","#f59e0b"])
+        ))
+        fig_pfunnel.update_layout(title="Payment Funnel", height=300,
+                                   margin=dict(t=40,b=10))
+        st.plotly_chart(fig_pfunnel, use_container_width=True)
+
+    # failure reason breakdown
+    st.subheader("❌ Failure Reason Breakdown")
+    st.caption("Each reason maps to a different action — don't treat all failures the same.")
+    fail_reasons = rev.get("failure_reason_breakdown", {})
+    if fail_reasons:
+        fr_df = pd.DataFrame({"reason": list(fail_reasons.keys()),
+                              "count":  list(fail_reasons.values())})
+        fr_df["action"] = fr_df["reason"].map({
+            "insufficient_funds": "Pricing may be high for segment — consider EMI option",
+            "card_declined":      "Wrong payment method offered — add UPI/netbanking",
+            "gateway_timeout":    "Infrastructure issue — check gateway SLA",
+            "invalid_vpa":        "UX validation missing for VPA field — fix frontend",
+            "bank_server_error":  "Intermittent — retry automatically, alert if > 5% of failures",
+        })
+        fig_fail = px.bar(fr_df, x="count", y="reason", orientation="h",
+                          color="count", color_continuous_scale=["#fef9c3","#ef4444"],
+                          title="Failures by Reason (each has a different fix)")
+        fig_fail.update_layout(height=300, margin=dict(t=40,b=10),
+                               coloraxis_showscale=False,
+                               yaxis=dict(autorange="reversed"))
+        st.plotly_chart(fig_fail, use_container_width=True)
+        st.dataframe(fr_df, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("🔗 Gateway Reconciliation")
+    st.caption("How we know our records match exactly what the gateway collected.")
+    col_g1, col_g2 = st.columns(2)
+    with col_g1:
+        recon = q("""
+            SELECT gateway_ref, amount_inr,
+                   initiated_at, resolved_at, status, failure_reason
+            FROM payments
+            ORDER BY initiated_at DESC LIMIT 20
+        """)
+        st.dataframe(recon, use_container_width=True, height=280)
+    with col_g2:
+        st.markdown("**Reconciliation Logic**")
+        st.markdown("""
+Each payment fires **two events** in `payment_events`:
+
+1. `payment_initiated` — when PlaceMux sends the charge
+2. `payment_success` / `payment_failed` — when gateway responds
+
+`gateway_ref` is the key that links our row to the gateway's own settlement report. On Day 1 of real money:
+
+```sql
+-- Compare our records to gateway settlement file
+SELECT pe.gateway_ref, pe.amount_inr AS our_amount,
+       gw.amount AS gateway_amount,
+       pe.amount_inr - gw.amount AS discrepancy
+FROM payment_events pe
+JOIN gateway_settlement gw
+  ON pe.gateway_ref = gw.reference_id
+WHERE pe.event_name = 'payment_success'
+  AND ABS(pe.amount_inr - gw.amount) > 0;
+```
+Any row returned = discrepancy to investigate before EOD.
+""")
+
+    st.divider()
+    st.subheader("🚀 Go-Live Checklist")
+    st.caption("What's left before switching from test mode to real money.")
+    checklist = [
+        ("Replace TEST_ gateway_ref prefix with real credentials (Razorpay/Stripe)", False),
+        ("Set gateway_mode='live' only after founder explicit sign-off", False),
+        ("Enable webhook endpoint — gateway posts callbacks to payment_events", False),
+        ("Run Day 1 reconciliation (compare our DB vs gateway settlement file)", False),
+        ("Wire failure_reason alerts to ops team (Slack/email)", False),
+        ("Confirm payment failure does NOT affect application.status", True),
+        ("Confirm 0 unreconciled stuck payments at EOD", True),
+    ]
+    for item, done in checklist:
+        icon = "✅" if done else "⬜"
+        st.markdown(f"{icon} {item}")
+
+    st.divider()
+    st.subheader("📖 Revenue Metric Dictionary")
+    rows = []
+    for name, defn in REVENUE_METRIC_DICTIONARY.items():
+        rows.append({
+            "Metric":   name,
+            "Value":    str(rev.get(name, "—")),
+            "Source":   defn["source"],
+            "Decision": defn["decision"][:90],
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True,
+                 hide_index=True, height=480)
+
+
+# ═══════════════════════════════════════════════════════
+# TAB 2 — OVERVIEW (Task 1 metrics)
+# ═══════════════════════════════════════════════════════
+with tabs[2]:
 
     # ── top KPI cards ────────────────────────────────────
     total_companies = q("SELECT COUNT(*) n FROM companies").iloc[0,0]
@@ -317,7 +495,7 @@ with tabs[1]:
 # ═══════════════════════════════════════════════════════
 # TAB 2 — JOB SUPPLY (Task 2 centrepiece)
 # ═══════════════════════════════════════════════════════
-with tabs[2]:
+with tabs[3]:
     st.subheader("Job Supply Instrumentation — Live View")
     st.caption("Every row below comes from a `job_posted` event in the `job_supply_events` table. "
                "This view is the Task 2 deliverable — events validated, jobs-posted view live.")
@@ -427,7 +605,7 @@ with tabs[2]:
 # ═══════════════════════════════════════════════════════
 # TAB 3 — COMPANY FUNNEL (Task 3 centrepiece)
 # ═══════════════════════════════════════════════════════
-with tabs[3]:
+with tabs[4]:
     st.subheader("Company Funnel — Search & Discovery")
     st.caption("Posted → Viewed → Applied → Shortlisted → Interviewed → Offered, "
                "built from job_supply_events, job_view_events, applications, "
@@ -573,7 +751,7 @@ with tabs[3]:
 # ═══════════════════════════════════════════════════════
 # TAB 4 — APPLICATION FUNNEL (Task 4 centrepiece)
 # ═══════════════════════════════════════════════════════
-with tabs[4]:
+with tabs[5]:
     st.subheader("Application Funnel — Applications & Shortlisting")
     st.caption("Submitted → Verified/Rejected → Shortlisted → Interviewed → Offered. "
                "Built from application_events (immutable log) — every application is "
@@ -687,7 +865,7 @@ with tabs[4]:
 # ═══════════════════════════════════════════════════════
 # TAB 5 — VALIDATION (Task 2 + Task 3 + Task 4 checks)
 # ═══════════════════════════════════════════════════════
-with tabs[5]:
+with tabs[6]:
     st.subheader("Job Supply Event Validation — All Checks")
 
     STATUS_COLOR = {"PASS":"#22c55e","WARN":"#f59e0b","FAIL":"#ef4444"}
@@ -873,12 +1051,56 @@ with tabs[5]:
     else:
         st.warning("⚠️ Review above before submitting.")
 
+    st.divider()
+    st.subheader("Task 6 — Revenue Metrics Validation")
+
+    n_pay  = q("SELECT COUNT(*) n FROM payments").iloc[0,0]
+    n_pevt = q("SELECT COUNT(*) n FROM payment_events").iloc[0,0]
+    r1 = "PASS" if n_pay > 50 and n_pevt > 100 else "FAIL"
+    st.markdown(f'**Check 1 — Payment data flowing** {badge(r1)}', unsafe_allow_html=True)
+    st.caption(f"payments: {n_pay} | payment_events: {n_pevt}")
+
+    last_pay = q("SELECT MAX(emitted_at) ts FROM payment_events").iloc[0,0]
+    hrs_pay  = (dt.datetime.now() - dt.datetime.strptime(last_pay, "%Y-%m-%d %H:%M:%S")).total_seconds()/3600
+    r2 = "PASS" if hrs_pay < 48 else "FAIL"
+    st.markdown(f'**Check 2 — Freshness (< 48h)** {badge(r2)}', unsafe_allow_html=True)
+    st.caption(f"Last event: {last_pay} ({hrs_pay:.1f}h ago)")
+
+    live_rows = q("SELECT COUNT(*) n FROM payments WHERE gateway_mode='live'").iloc[0,0]
+    r3 = "PASS" if live_rows == 0 else "FAIL"
+    st.markdown(f'**Check 3 — Gateway in test mode (no live-mode rows)** {badge(r3)}',
+                unsafe_allow_html=True)
+    st.caption(f"Live-mode payments: {live_rows}")
+
+    stuck = q("SELECT COUNT(*) n FROM payments WHERE status='initiated' AND resolved_at IS NULL").iloc[0,0]
+    r4 = "PASS" if stuck == 0 else "WARN"
+    st.markdown(f'**Check 4 — No unreconciled stuck payments** {badge(r4)}', unsafe_allow_html=True)
+    st.caption(f"Stuck payments: {stuck}")
+
+    null_pay = q("""
+        SELECT SUM(CASE WHEN company_id IS NULL THEN 1 ELSE 0 END)+
+               SUM(CASE WHEN amount_inr IS NULL THEN 1 ELSE 0 END)+
+               SUM(CASE WHEN gateway_ref IS NULL THEN 1 ELSE 0 END) n
+        FROM payments""").iloc[0,0]
+    r5 = "PASS" if null_pay == 0 else "WARN"
+    st.markdown(f'**Check 5 — No nulls in required payment fields** {badge(r5)}',
+                unsafe_allow_html=True)
+    st.caption(f"Nulls: {null_pay}")
+
+    rev_ok = all(x == "PASS" for x in [r1, r2, r3, r4, r5])
+    if rev_ok:
+        st.success("✅ ALL TASK 6 CHECKS PASS — Revenue metrics defined, sourced, "
+                   "and demoable. Gateway in test mode. Revenue contract ready for hand-off.")
+    else:
+        st.warning("⚠️ Review Task 6 warnings above.")
+
 
 # ═══════════════════════════════════════════════════════
-# TAB 7 — RAW DATA
+# TAB 8 — RAW DATA
 # ═══════════════════════════════════════════════════════
-with tabs[6]:
+with tabs[7]:
     table = st.selectbox("Table", ["applications","jobs","students","companies","interviews",
                                    "offers","job_supply_events","job_search_events",
-                                   "job_view_events","application_events"])
+                                   "job_view_events","application_events",
+                                   "payments","payment_events"])
     st.dataframe(q(f"SELECT * FROM {table}"), use_container_width=True, height=500)

@@ -1,49 +1,70 @@
 # 📊 PlaceMux — Marketplace Analytics
 
-> **Phase 2 · Week 2 · Data Analyst Track — All 5 Tasks Complete**  
-> Task 1: Marketplace Data Model | Task 2: Job Supply | Task 3: Company Funnel | Task 4: Application Funnel | Task 5: Liquidity Dashboard
+> **Phase 2 · Week 3 · Data Analyst Track — Tasks 1–6 Complete**
+
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://placemux-analytics.streamlit.app)
 
 ---
 
-## Overview
+## 🚀 Live Dashboard
 
-PlaceMux is a coding-assessment and placement platform. This repository contains the complete **Data Analyst layer** — event instrumentation, metric definitions, live data pipeline, and a 7-tab analytics dashboard covering every stage of the marketplace.
+**[▶ Open Live Dashboard](https://placemux-analytics.streamlit.app)**
 
-| Layer | What it does |
-|---|---|
-| **Event tracking** | 16+ marketplace events: supply, search, view, application, verification, shortlisting |
-| **Live data pipeline** | Real-time `job_posted` + `job_search_performed` + `application_submitted` stream |
-| **Liquidity engine** | `liquidity_engine.py` — 14 metrics, each sourced and decision-linked, feeds the composite index |
-| **Verification gate** | Every application checked against job's min_cgpa; only verified candidates can be shortlisted |
-| **Dashboard** | Streamlit — 7 tabs: Liquidity, Overview, Job Supply, Company Funnel, Application Funnel, Validation, Raw Data |
-| **Scalability** | Benchmarked at 10x / 50x / 100x; Liquidity Index inputs: 42ms at 100x |
+*Deployed on Streamlit Cloud — no setup needed, opens in browser.*
 
----
-
-## Quickstart
-
+To run locally instead:
 ```bash
 git clone https://github.com/<your-username>/placemux-analytics.git
 cd placemux-analytics
 pip install -r requirements.txt
-
-python3 create_database.py              # build schema (11 tables)
-python3 live_data.py seed               # seed baseline data (one-time)
-python3 validate_job_supply.py          # Task 2 checks
-python3 validate_company_funnel.py      # Task 3 checks
-python3 validate_application_funnel.py  # Task 4 checks
-python3 validate_liquidity_dashboard.py # Task 5 checks — end-to-end
-streamlit run dashboard.py              # open http://localhost:8501
+python3 create_database.py
+python3 live_data.py seed
+streamlit run dashboard.py        # → http://localhost:8501
 ```
 
 ---
 
-## Live Data
+## 📸 Dashboard — Live Numbers
 
-```bash
-python3 live_data.py live      # rotates: job_posted / job_search / application_submitted
-python3 live_data.py status    # check event stats live
-```
+> These are real numbers computed from the seeded database — not placeholders.
+
+### 💧 Liquidity Index: **82.6 / 100 [HEALTHY]**
+> Marketplace healthy — continue onboarding companies.
+
+| Component | Weight | Score |
+|---|---|---|
+| Fill Proxy (apply→shortlist rate) | 35% | 45.1% |
+| Supply Health (active listings) | 30% | 100.0 |
+| Discovery (search→view rate) | 20% | 53.4% |
+| Verification Quality | 15% | 67.8% |
+
+### 📊 End-to-End Funnel (company posts → student applies → company shortlists)
+
+| Stage | Count |
+|---|---|
+| Posted | 300 |
+| Viewed | 1,083 |
+| Applied | 1,506 |
+| Verified | 1,021 |
+| Shortlisted+ | 460 |
+| Offered | 134 |
+
+### 💰 Revenue Metrics (Task 6) — Gateway Mode: **TEST**
+
+| Payment Type | Transactions | Successful | Revenue (INR) |
+|---|---|---|---|
+| job_slot | 236 | 199 | ₹5,96,801 |
+| per_shortlist | 460 | 379 | ₹1,89,500 |
+| subscription | 12 | 11 | ₹1,09,989 |
+| **Total** | **708** | **589** | **₹8,96,290** |
+
+| Metric | Value |
+|---|---|
+| Payment Success Rate | 83.2% |
+| Paying Companies | 78 / 80 |
+| ARPC (Avg Revenue per Company) | ₹11,491 |
+| Gateway Mode | **test** (no real money) |
+| Shortlist Integrity | **100%** (0 violations) |
 
 ---
 
@@ -52,54 +73,73 @@ python3 live_data.py status    # check event stats live
 ```
 Backend API
     ├─ job_posted ──────────────▶ emit_job_posted()
-    │                                ├──▶ jobs
-    │                                └──▶ job_supply_events          (Task 2)
-    │
+    │                                └──▶ job_supply_events     (Task 2)
     ├─ student searches ────────▶ emit_job_search()
-    │                                ├──▶ job_search_events          (Task 3)
-    │                                └──▶ job_view_events on click   (Task 3)
-    │
-    └─ student applies ─────────▶ emit_application()  [verifies min_cgpa]
-                                     ├──▶ applications (verified flag)
-                                     └──▶ application_events         (Task 4)
+    │                                └──▶ job_search_events     (Task 3)
+    │                                └──▶ job_view_events       (Task 3)
+    ├─ student applies ─────────▶ emit_application() [verifies min_cgpa]
+    │                                └──▶ application_events    (Task 4)
+    ├─ company shortlists ──────▶ emit_shortlist() [refuses if unverified]
+    └─ company pays ────────────▶ emit_payment()
+                                     ├──▶ payments              (Task 6)
+                                     └──▶ payment_events        (Task 6)
                                               │
-                                     emit_shortlist() — refuses if verified=0
+                              liquidity_engine.py + revenue_engine.py
                                               │
-                              liquidity_engine.py  ── 14 metrics ── Liquidity Index
-                                              │
-                              dashboard.py  ── Tab 0: Liquidity Dashboard (Task 5)
+                              dashboard.py — 8 tabs
 ```
 
 ---
 
-## Scalability
+## Database Schema
 
-| Scale | Liquidity Index inputs | Application funnel | Company funnel (known bottleneck) |
+> Full explanation of every table: see **[SCHEMA.md](./SCHEMA.md)**
+
+| Table | Type | Task | Purpose |
 |---|---|---|---|
-| Baseline | 0.36 ms | 0.16 ms | 3.15 ms |
-| 10x | 3.82 ms | 1.62 ms | 36.87 ms |
-| 50x | 21.23 ms | 9.50 ms | ~270 ms ⚠️ |
-| 100x | 42.69 ms ✅ | ~20 ms ✅ | ~520–710 ms ✗ |
-
-Company funnel bottleneck (Task 3, documented): precompute a summary table at 50x+. All other queries, including the full Liquidity Index, stay well under 100ms at 100x.
+| `companies` | Entity | 1 | Company master records |
+| `jobs` | Entity | 1 | Job postings with skill thresholds |
+| `students` | Entity | 1 | Candidate profiles with CGPA |
+| `applications` | Entity | 1/4 | Applications with `verified` flag |
+| `interviews` | Entity | 1 | Interview scheduling |
+| `offers` | Entity | 1 | Final-stage offers |
+| `job_supply_events` | **Event log** | 2 | Every job posting, immutable |
+| `job_search_events` | **Event log** | 3 | Every search with latency + fit score |
+| `job_view_events` | **Event log** | 3 | Every job view (search or browse) |
+| `application_events` | **Event log** | 4 | Full application status history |
+| `payments` | Entity | 6 | Payment transactions with gateway status |
+| `payment_events` | **Event log** | 6 | Immutable payment audit trail |
+| `payment_reconciliation` | Audit | 6 | Daily DB vs gateway comparison |
+| `sqlite_sequence` | **SQLite internal** | — | Auto-created, safe to ignore |
 
 ---
 
 ## Task Deliverables
 
-| Task | Deliverable | Status |
-|---|---|---|
-| Task 1 | Liquidity metrics, tracking plan, data quality framework | ✅ |
-| Task 2 | `job_supply_events`, `emit_job_posted()`, 5 validation checks | ✅ |
-| Task 3 | `job_search_events`, `job_view_events`, fit ranking, company funnel | ✅ |
-| Task 4 | `application_events`, verification gate, `emit_shortlist()`, application funnel | ✅ |
-| Task 5 | `liquidity_engine.py`, Liquidity Index (82.6/100), end-to-end validation, 7-tab dashboard | ✅ |
+| Task | Deliverable | Validator | Status |
+|---|---|---|---|
+| Task 1 | Marketplace schema, liquidity metrics, tracking plan | — | ✅ |
+| Task 2 | `job_supply_events`, live jobs-posted view | `validate_job_supply.py` | ✅ |
+| Task 3 | Search events, fit-score ranking, company funnel | `validate_company_funnel.py` | ✅ |
+| Task 4 | Verification gate, application funnel, integrity check | `validate_application_funnel.py` | ✅ |
+| Task 5 | Liquidity Index (82.6/100), 14 metrics, end-to-end dashboard | `validate_liquidity_dashboard.py` | ✅ |
+| Task 6 | Revenue metrics, payment events, gateway reconciliation | `validate_revenue_metrics.py` | ✅ |
 
-### Task 5 Self-Check (Section 11)
-- *Liquidity dashboard working live?* Yes — Tab 0, Liquidity Index 82.6/100 [HEALTHY], all 14 metrics sourced and explainable.
-- *Company posts → student applies → company shortlists end-to-end?* Yes — 300 posted → 1,103 views → 1,503 applied → 1,049 verified → 486 shortlisted. Full funnel in Tab 0.
-- *What happens to a student below the threshold?* `application_rejected_unverified` event fires; `verified=0` set; `emit_shortlist()` refuses; shortlist integrity = 100%.
-- *How fast is search?* p95 latency: 59ms. Liquidity Index inputs query: 42ms at 100x.
+### Task 6 Self-Check Answers
+- *What happens if a payment fails halfway?* `emit_payment()` fires `payment_failed` event, sets `status='failed'`. The student's application is **not touched** — `emit_shortlist()` is independent of payment outcome. Zero failed-payment applications leaked into shortlisted status (validated by Check 4).
+- *How do we know records match what the gateway collected?* `payment_reconciliation` table runs daily — compares our `SUM(amount_inr)` vs gateway API total. Any discrepancy > ₹0.01 flags as unmatched. 7-day history seeded; available in Tab 1 of the dashboard.
+- *Are we in test mode or live mode?* **Test mode confirmed** — 0 payments processed with `gateway_mode='live'`. Remaining steps before real money: go-live checklist sign-off, production gateway credentials, failure alerting wired to on-call.
+
+---
+
+## Revenue Metric Definitions (Task 6 Tracking Plan Addition)
+
+| Event | Fires When | Key Payload |
+|---|---|---|
+| `payment_initiated` | Company attempts payment | `amount_inr`, `payment_type`, `gateway_ref`, `gateway_mode` |
+| `payment_success` | Gateway confirms collection | `amount_inr`, `gateway_ref` |
+| `payment_failed` | Gateway rejects payment | `failure_reason`, `gateway_ref` |
+| `payment_refunded` | Refund issued | `amount_inr`, `gateway_ref` |
 
 ---
 
@@ -107,16 +147,18 @@ Company funnel bottleneck (Task 3, documented): precompute a summary table at 50
 
 ```
 placemux-analytics/
-├── create_database.py              # 11-table schema
-├── live_data.py                    # Live event pipeline
-├── liquidity_engine.py             # Task 5: 14 metrics + Liquidity Index
+├── create_database.py              # 13-table schema (11 domain + 2 infra)
+├── live_data.py                    # Live pipeline: job_posted / search / apply / pay
+├── revenue_engine.py               # Task 6: revenue metric computation
+├── liquidity_engine.py             # Task 5: liquidity index computation
 ├── validate_job_supply.py          # Task 2 validation
 ├── validate_company_funnel.py      # Task 3 validation
 ├── validate_application_funnel.py  # Task 4 validation
-├── validate_liquidity_dashboard.py # Task 5 validation (end-to-end)
-├── scalability_test.py             # Benchmark at 10x / 50x / 100x
-├── dashboard.py                    # Streamlit dashboard — 7 tabs
-├── scalability_report.txt          # Auto-generated benchmark report
+├── validate_liquidity_dashboard.py # Task 5 validation
+├── validate_revenue_metrics.py     # Task 6 validation
+├── scalability_test.py             # 10x / 50x / 100x benchmarks
+├── dashboard.py                    # Streamlit — 8 tabs
+├── SCHEMA.md                       # Every table explained + defended
 ├── requirements.txt
 ├── .gitignore
 └── README.md

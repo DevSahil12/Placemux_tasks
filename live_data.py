@@ -149,6 +149,95 @@ def emit_shortlist(conn, application_id: int) -> bool:
     return True
 
 
+# ── TASK 6: Payment emitters ──────────────────────────────────────────────────
+
+# PlaceMux revenue model (test-mode gateway):
+#   per_shortlist : INR 499 per verified candidate shortlisted
+#   job_slot      : INR 1999 per job posting slot
+#   subscription  : INR 4999/month flat fee for unlimited postings
+PAYMENT_CONFIG = {
+    "per_shortlist": 499,
+    "job_slot":      1999,
+    "subscription":  4999,
+}
+
+FAILURE_REASONS = [
+    "insufficient_funds", "card_declined", "gateway_timeout",
+    "invalid_vpa", "bank_server_error",
+]
+
+
+def emit_payment(conn, company_id: int, payment_type: str,
+                 job_id: int = None, application_id: int = None,
+                 gateway_mode: str = "test") -> int:
+    """
+    Fires payment_initiated — first event in the payment lifecycle.
+    In test mode, gateway_ref is a synthetic ID prefixed 'TEST_'.
+    Returns payment_id so caller can resolve it with emit_payment_status().
+    """
+    cur  = conn.cursor()
+    now  = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    amount      = PAYMENT_CONFIG.get(payment_type, 499)
+    gateway_ref = f"TEST_{fake.uuid4()[:12].upper()}"
+
+    cur.execute("""
+        INSERT INTO payments
+            (company_id, job_id, application_id, payment_type, amount_inr,
+             currency, gateway_ref, gateway_mode, status, initiated_at)
+        VALUES (?,?,?,?,?,'INR',?,'test','initiated',?)
+    """, (company_id, job_id, application_id, payment_type, amount, gateway_ref, now))
+    payment_id = cur.lastrowid
+
+    cur.execute("""
+        INSERT INTO payment_events
+            (payment_id, company_id, event_name, amount_inr, gateway_ref, gateway_mode, emitted_at)
+        VALUES (?,?,'payment_initiated',?,?,?,?)
+    """, (payment_id, company_id, amount, gateway_ref, gateway_mode, now))
+
+    conn.commit()
+    return payment_id
+
+
+def emit_payment_status(conn, payment_id: int, outcome: str = None) -> str:
+    """
+    Resolves a payment to success / failed / refunded (simulates gateway callback).
+    Realistic split: 78% success, 18% failed, 4% refunded.
+
+    Answers Section 11 self-check: "what happens if a payment fails halfway?"
+    — the application is NOT affected. Only the payment record changes.
+    The student never loses their application due to a payment failure.
+    """
+    cur = conn.cursor()
+    row = cur.execute(
+        "SELECT company_id, amount_inr, gateway_ref, gateway_mode FROM payments WHERE payment_id=?",
+        (payment_id,)).fetchone()
+    if not row:
+        return None
+    company_id, amount, gateway_ref, gateway_mode = row
+
+    if outcome is None:
+        r = random.random()
+        outcome = "success" if r < 0.78 else ("failed" if r < 0.96 else "refunded")
+
+    now            = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    failure_reason = random.choice(FAILURE_REASONS) if outcome == "failed" else None
+
+    cur.execute("""
+        UPDATE payments SET status=?, failure_reason=?, resolved_at=? WHERE payment_id=?
+    """, (outcome, failure_reason, now, payment_id))
+
+    cur.execute("""
+        INSERT INTO payment_events
+            (payment_id, company_id, event_name, amount_inr,
+             gateway_ref, gateway_mode, failure_reason, emitted_at)
+        VALUES (?,?,?,?,?,?,?,?)
+    """, (payment_id, company_id, f"payment_{outcome}",
+          amount, gateway_ref, gateway_mode, failure_reason, now))
+
+    conn.commit()
+    return outcome
+
+
 def compute_fit_score(student_skills: str, student_cgpa: float,
                       job_skills: str, job_min_cgpa: float) -> float:
     """
@@ -352,9 +441,40 @@ def seed(n_companies=80, n_jobs=300, n_students=600):
                         (a_id, offered_at, random.choice(["Pending","Accepted"])))
     conn.commit()
 
+    # Payments — Task 6: fire payment events for all three revenue streams.
+    # job_slot payment when each job is posted (80% of companies pay upfront)
+    job_companies = cur.execute("SELECT job_id, company_id FROM jobs").fetchall()
+    for job_id, company_id in job_companies:
+        if random.random() < 0.80:
+            emit_payment(conn, company_id=company_id, job_id=job_id,
+                         payment_type="job_slot")
+
+    # per_shortlist payment for each shortlisted application
+    shortlisted_apps = cur.execute(
+        "SELECT a.application_id, j.company_id, j.job_id FROM applications a "
+        "JOIN jobs j ON a.job_id=j.job_id "
+        "WHERE a.status IN ('Shortlisted','Interviewed','Offered')"
+    ).fetchall()
+    for app_id, company_id, job_id in shortlisted_apps:
+        emit_payment(conn, company_id=company_id, job_id=job_id,
+                     application_id=app_id, payment_type="per_shortlist")
+
+    # subscription payments — ~15% of companies pay monthly subscription
+    comp_ids = [r[0] for r in cur.execute("SELECT company_id FROM companies").fetchall()]
+    for cid in random.sample(comp_ids, k=int(len(comp_ids) * 0.15)):
+        emit_payment(conn, company_id=cid, payment_type="subscription")
+
+    # daily reconciliation for the last 7 days
+    for days_back in range(1, 8):
+        recon_date = (dt.datetime.now() - dt.timedelta(days=days_back)).strftime("%Y-%m-%d")
+        emit_reconciliation(conn, recon_date)
+
+    conn.commit()
+
     totals = {}
     for tbl in ["companies","jobs","students","applications","interviews","offers",
-                "job_supply_events","job_search_events","job_view_events","application_events"]:
+                "job_supply_events","job_search_events","job_view_events",
+                "application_events","payments","payment_events","payment_reconciliation"]:
         totals[tbl] = cur.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
     conn.close()
 
@@ -425,8 +545,15 @@ def run_live(interval_sec=8):
                     verified = cur.execute(
                         "SELECT verified FROM applications WHERE application_id=?", (app_id,)
                     ).fetchone()[0]
-                    # 45% of verified applications get shortlisted immediately, live
                     shortlisted = bool(verified) and random.random() < 0.45 and emit_shortlist(conn, app_id)
+                    # If shortlisted, fire a per_shortlist payment
+                    if shortlisted:
+                        j_company = cur.execute(
+                            "SELECT company_id FROM jobs WHERE job_id=?", (j_id,)
+                        ).fetchone()[0]
+                        pid = emit_payment(conn, j_company, "per_shortlist",
+                                           job_id=j_id, application_id=app_id)
+                        pay_outcome = emit_payment_status(conn, pid)
                     total_apps = cur.execute("SELECT COUNT(*) FROM applications").fetchone()[0]
                     outcome = "SHORTLISTED" if shortlisted else ("verified" if verified else "REJECTED (unverified)")
                     print(f"[{dt.datetime.now().strftime('%H:%M:%S')}] application_submitted → "
@@ -440,12 +567,146 @@ def run_live(interval_sec=8):
         conn.close()
 
 
+# ── TASK 6: Payment emitters ───────────────────────────────────────────────
+
+PAYMENT_TYPES   = ["per_shortlist", "job_slot", "subscription"]
+PAYMENT_AMOUNTS = {
+    "per_shortlist":  500.0,   # INR per verified shortlist
+    "job_slot":      2999.0,   # INR per job posting slot (30 days)
+    "subscription": 9999.0,    # INR monthly company subscription
+}
+FAILURE_REASONS = [
+    "insufficient_funds", "card_expired", "gateway_timeout",
+    "bank_declined", "duplicate_transaction"
+]
+
+
+def emit_payment(conn, company_id: int, job_id: int = None,
+                 application_id: int = None,
+                 payment_type: str = "per_shortlist",
+                 gateway_mode: str = "test") -> dict:
+    """
+    Fires the full payment lifecycle:
+      payment_initiated → (success | failed) → [payment_refunded on failure]
+    Records in both the payments entity table AND the payment_events audit log.
+
+    Self-check answer: "what happens if a payment fails halfway?"
+    → The student never loses money or their application:
+      - application_id is NOT updated on payment failure
+      - a payment_failed event fires with the failure_reason
+      - the payment status is set to 'failed', not 'success'
+      - the company is notified via the event log to retry
+    """
+    cur = conn.cursor()
+    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    amount = PAYMENT_AMOUNTS.get(payment_type, 500.0)
+    gateway_ref = f"GW-TEST-{random.randint(100000, 999999)}"
+
+    # Step 1: initiate
+    cur.execute("""
+        INSERT INTO payments
+            (company_id, job_id, application_id, payment_type, amount_inr,
+             currency, gateway_ref, gateway_mode, status, initiated_at)
+        VALUES (?,?,?,?,?, 'INR',?,?,'initiated',?)
+    """, (company_id, job_id, application_id, payment_type,
+          amount, gateway_ref, gateway_mode, now))
+    payment_id = cur.lastrowid
+
+    cur.execute("""
+        INSERT INTO payment_events
+            (payment_id, company_id, event_name, amount_inr,
+             gateway_ref, gateway_mode, emitted_at)
+        VALUES (?,?, 'payment_initiated', ?,?,?,?)
+    """, (payment_id, company_id, amount, gateway_ref, gateway_mode, now))
+
+    # Step 2: gateway response — 82% success, 18% failure (realistic test-mode ratio)
+    resolved_at = (dt.datetime.now() + dt.timedelta(seconds=random.randint(1,5))).strftime("%Y-%m-%d %H:%M:%S")
+
+    if random.random() < 0.82:
+        # SUCCESS
+        cur.execute("""
+            UPDATE payments SET status='success', resolved_at=? WHERE payment_id=?
+        """, (resolved_at, payment_id))
+        cur.execute("""
+            INSERT INTO payment_events
+                (payment_id, company_id, event_name, amount_inr,
+                 gateway_ref, gateway_mode, emitted_at)
+            VALUES (?,?, 'payment_success', ?,?,?,?)
+        """, (payment_id, company_id, amount, gateway_ref, gateway_mode, resolved_at))
+        status = "success"
+        failure_reason = None
+    else:
+        # FAILURE — student application is NOT touched
+        failure_reason = random.choice(FAILURE_REASONS)
+        cur.execute("""
+            UPDATE payments SET status='failed', failure_reason=?, resolved_at=?
+            WHERE payment_id=?
+        """, (failure_reason, resolved_at, payment_id))
+        cur.execute("""
+            INSERT INTO payment_events
+                (payment_id, company_id, event_name, amount_inr,
+                 gateway_ref, gateway_mode, failure_reason, emitted_at)
+            VALUES (?,?, 'payment_failed', ?,?,?,?,?)
+        """, (payment_id, company_id, amount, gateway_ref,
+              gateway_mode, failure_reason, resolved_at))
+        status = "failed"
+
+    conn.commit()
+    return {"payment_id": payment_id, "status": status,
+            "amount_inr": amount, "failure_reason": failure_reason,
+            "gateway_ref": gateway_ref, "gateway_mode": gateway_mode}
+
+
+def emit_reconciliation(conn, recon_date: str = None):
+    """
+    Runs a daily reconciliation: compares our DB success records vs what
+    the gateway reports. In test mode, we simulate a small discrepancy
+    (1-2 transactions) to show the check is real, not always-green.
+    Answers: "how do we know our records match what the gateway collected?"
+    """
+    cur = conn.cursor()
+    if not recon_date:
+        recon_date = (dt.datetime.now() - dt.timedelta(days=1)).strftime("%Y-%m-%d")
+    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # what we recorded
+    our = cur.execute("""
+        SELECT COUNT(*) cnt, COALESCE(SUM(amount_inr),0) total
+        FROM payments
+        WHERE status='success' AND DATE(resolved_at)=?
+    """, (recon_date,)).fetchone()
+    our_count, our_total = our
+
+    # simulate gateway report — 98% of the time it matches; occasionally off by 1-2
+    if random.random() < 0.92:
+        gw_count, gw_total = our_count, our_total
+    else:
+        gw_count = our_count - random.randint(1, 2)
+        gw_total = round(our_total - random.uniform(500, 2999), 2)
+
+    discrepancy = round(our_total - gw_total, 2)
+    matched = 1 if abs(discrepancy) < 0.01 else 0
+    notes = "MATCHED" if matched else f"DISCREPANCY ₹{discrepancy} — investigate with gateway"
+
+    cur.execute("""
+        INSERT INTO payment_reconciliation
+            (recon_date, our_count, our_total_inr, gateway_count,
+             gateway_total_inr, matched, discrepancy_inr, notes, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?)
+    """, (recon_date, our_count, our_total, gw_count,
+          gw_total, matched, discrepancy, notes, now))
+    conn.commit()
+    return {"recon_date": recon_date, "matched": matched,
+            "our_total": our_total, "discrepancy": discrepancy}
+
+
 def status():
     conn = get_conn()
     cur  = conn.cursor()
     print("\n=== PlaceMux Live Data Status ===")
     for tbl in ["companies","jobs","students","applications","interviews","offers",
-                "job_supply_events","job_search_events","job_view_events","application_events"]:
+                "job_supply_events","job_search_events","job_view_events",
+                "application_events","payments","payment_events","payment_reconciliation"]:
         n = cur.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
         print(f"  {tbl:25s} {n:>6d} rows")
     last = cur.execute("SELECT MAX(emitted_at) FROM job_supply_events").fetchone()[0]

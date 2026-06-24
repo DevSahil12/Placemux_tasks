@@ -4,6 +4,9 @@ conn = sqlite3.connect("placemux.db")
 cur = conn.cursor()
 
 cur.executescript("""
+DROP TABLE IF EXISTS payment_reconciliation;
+DROP TABLE IF EXISTS payment_events;
+DROP TABLE IF EXISTS payments;
 DROP TABLE IF EXISTS application_events;
 DROP TABLE IF EXISTS job_view_events;
 DROP TABLE IF EXISTS job_search_events;
@@ -136,6 +139,60 @@ CREATE TABLE application_events (
     FOREIGN KEY (student_id)     REFERENCES students(student_id),
     FOREIGN KEY (job_id)         REFERENCES jobs(job_id),
     FOREIGN KEY (company_id)     REFERENCES companies(company_id)
+);
+
+-- ── TASK 6: Payments Design & Gateway Setup ────────────────────────────────
+-- payments: entity table — one row per transaction, mutable (status can change).
+-- Revenue model: companies pay per shortlist or per job slot (test-mode gateway).
+CREATE TABLE payments (
+    payment_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id      INTEGER,
+    job_id          INTEGER,
+    application_id  INTEGER,
+    payment_type    TEXT,    -- 'per_shortlist' | 'job_slot' | 'subscription'
+    amount_inr      REAL,
+    currency        TEXT DEFAULT 'INR',
+    gateway_ref     TEXT,    -- reference ID returned by payment gateway
+    gateway_mode    TEXT DEFAULT 'test',  -- 'test' | 'live'
+    status          TEXT,    -- 'initiated' | 'success' | 'failed' | 'refunded'
+    failure_reason  TEXT,
+    initiated_at    TEXT,
+    resolved_at     TEXT,
+    FOREIGN KEY (company_id)     REFERENCES companies(company_id),
+    FOREIGN KEY (job_id)         REFERENCES jobs(job_id),
+    FOREIGN KEY (application_id) REFERENCES applications(application_id)
+);
+
+-- payment_events: immutable audit log — every status change fires a row here.
+-- Answers: "how do we know records match exactly what the gateway collected?"
+CREATE TABLE payment_events (
+    pe_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    payment_id      INTEGER,
+    company_id      INTEGER,
+    event_name      TEXT,    -- payment_initiated | payment_success | payment_failed |
+                             -- payment_refunded | gateway_reconciled
+    amount_inr      REAL,
+    gateway_ref     TEXT,
+    gateway_mode    TEXT,
+    failure_reason  TEXT,
+    emitted_at      TEXT,
+    FOREIGN KEY (payment_id) REFERENCES payments(payment_id),
+    FOREIGN KEY (company_id) REFERENCES companies(company_id)
+);
+
+-- payment_reconciliation: daily summary comparing our DB records vs gateway records.
+-- Answers: "how do we know our records match exactly what the gateway says we collected?"
+CREATE TABLE payment_reconciliation (
+    recon_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    recon_date      TEXT,
+    our_count       INTEGER,  -- payments we recorded as success
+    our_total_inr   REAL,     -- total INR we recorded
+    gateway_count   INTEGER,  -- what the gateway API reports for that date
+    gateway_total_inr REAL,
+    matched         INTEGER,  -- 1 if counts and totals agree, 0 if discrepancy
+    discrepancy_inr REAL,     -- our_total - gateway_total (0 if matched)
+    notes           TEXT,
+    created_at      TEXT
 );
 """)
 
