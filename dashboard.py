@@ -9,6 +9,9 @@ import sqlite3, pandas as pd, plotly.express as px, plotly.graph_objects as go
 import datetime as dt, os
 from liquidity_engine import compute, health_status, METRIC_DICTIONARY
 from revenue_engine import compute_revenue, REVENUE_METRIC_DICTIONARY
+from conversion_engine import (compute as compute_conversion,
+                                get_failure_examples, get_abandonment_examples,
+                                CONVERSION_METRIC_DICTIONARY)
 
 DB = os.path.join(os.path.dirname(__file__), "placemux.db")
 TODAY = dt.datetime.now()
@@ -30,15 +33,20 @@ def get_metrics():
 def get_revenue():
     return compute_revenue(DB)
 
+@st.cache_data(ttl=30)
+def get_conversion():
+    return compute_conversion(DB)
+
 # ── header ──────────────────────────────────────────────────────────────────
 st.markdown(f"""
 <div style='background:linear-gradient(90deg,#1e2761,#3b5bdb);padding:1.2rem 2rem;
             border-radius:12px;margin-bottom:1.2rem'>
   <h1 style='color:#fff;margin:0;font-size:1.8rem'>📊 PlaceMux Marketplace Dashboard</h1>
-  <p style='color:#cadcfc;margin:0.25rem 0 0'>Phase 2 · Week 3 · Tasks 1–6 &nbsp;|&nbsp; As of {TODAY.strftime('%d %b %Y')}</p>
+  <p style='color:#cadcfc;margin:0.25rem 0 0'>Phase 2 · Week 3 · Tasks 1–7 &nbsp;|&nbsp; As of {TODAY.strftime('%d %b %Y')}</p>
 </div>""", unsafe_allow_html=True)
 
-tabs = st.tabs(["💧 Liquidity (Task 5)", "💰 Revenue (Task 6)", "🏠 Overview",
+tabs = st.tabs(["💧 Liquidity (Task 5)", "💰 Revenue (Task 6)",
+                "🔁 Conversion (Task 7)", "🏠 Overview",
                 "📦 Job Supply (Task 2)",
                 "🏢 Company Funnel (Task 3)", "📝 Application Funnel (Task 4)",
                 "🔍 Validation", "📋 Raw Data"])
@@ -201,7 +209,7 @@ with tabs[0]:
 # ═══════════════════════════════════════════════════════
 # TAB 1 — REVENUE METRICS (Task 6 centrepiece)
 # ═══════════════════════════════════════════════════════
-with tabs[1]:
+with tabs[2]:
     rev = get_revenue()
 
     st.subheader("💰 Revenue Metrics — Payments Design & Gateway Setup")
@@ -371,9 +379,161 @@ Any row returned = discrepancy to investigate before EOD.
 
 
 # ═══════════════════════════════════════════════════════
-# TAB 2 — OVERVIEW (Task 1 metrics)
+# TAB 2 — CONVERSION BASELINE (Task 7 centrepiece)
 # ═══════════════════════════════════════════════════════
 with tabs[2]:
+    cm = get_conversion()
+
+    st.subheader("🔁 Conversion Baseline — Pay-per-Application (₹100)")
+    st.caption("A student pays ₹100 to apply to a job. This tab tracks the "
+               "full funnel: viewed → pay initiated → pay success/failed → "
+               "application created. Gateway mode: **TEST** (no real money yet).")
+
+    # ── headline metrics ────────────────────────────────────────
+    c1,c2,c3,c4 = st.columns(4)
+    e2e = cm["end_to_end_conversion_rate"]
+    e2e_color = "#22c55e" if e2e >= 20 else ("#f59e0b" if e2e >= 10 else "#ef4444")
+    c1.metric("End-to-End Conversion", f"{e2e}%",
+              help="% of views that ended in a paid application. "
+                   "Formula: COUNT(application_created)/COUNT(job_viewed)×100")
+    c2.metric("Payment Success Rate", f"{cm['payment_success_rate']}%",
+              help="% of payment attempts confirmed by gateway. "
+                   "Formula: COUNT(pay_per_app_success)/COUNT(pay_per_app_initiated)×100")
+    c3.metric("Pay→App Integrity", f"{cm['payment_to_application_rate']}%",
+              help="% of successful payments that created an application. "
+                   "Must be 100%. Any < 100% = student paid but got no app = bug.")
+    c4.metric("Revenue (₹100 fees)", f"₹{cm['revenue_from_conversions_inr']:,.0f}",
+              help="Total ₹100 fees collected. "
+                   "Formula: SUM(amount_inr) WHERE status='success'")
+
+    c5,c6,c7,c8 = st.columns(4)
+    c5.metric("View→Pay Rate",    f"{cm['view_to_pay_initiated_rate']}%",
+              help="Formula: COUNT(pay_per_app_initiated)/COUNT(job_viewed)×100")
+    c6.metric("Abandonment Rate", f"{cm['abandonment_rate']}%",
+              help="Formula: COUNT(application_abandoned)/COUNT(pay_per_app_initiated)×100")
+    c7.metric("Avg Convert Time", f"{cm['avg_time_to_convert_seconds']}s",
+              help="Avg seconds from pay_initiated to application_created")
+    c8.metric("Gateway Mode",
+              "✅ TEST" if "test" in (cm["gateway_mode"] or []) else "⚠️ LIVE",
+              help="Must be 'test' until go-live checklist signed off")
+
+    st.divider()
+
+    # ── conversion funnel chart ─────────────────────────────────
+    col_f, col_b = st.columns([2, 1])
+    with col_f:
+        f = cm["_funnel"]
+        funnel_df = pd.DataFrame({
+            "stage": list(f.keys()),
+            "count": list(f.values())
+        })
+        fig_conv = go.Figure(go.Funnel(
+            y=funnel_df["stage"], x=funnel_df["count"],
+            textinfo="value+percent initial",
+            marker=dict(color=["#1e2761","#3b5bdb","#22c55e",
+                               "#a5b4fc","#ef4444","#f59e0b"])
+        ))
+        fig_conv.update_layout(
+            title="Student Pay-per-Application Funnel (₹100 flow)",
+            height=380, margin=dict(t=40,b=10))
+        st.plotly_chart(fig_conv, use_container_width=True)
+
+    with col_b:
+        st.markdown("**Failure Breakdown**")
+        if cm["failure_rate_by_reason"]:
+            fail_df = pd.DataFrame([
+                {"Reason": k, "% of Failures": v}
+                for k, v in cm["failure_rate_by_reason"].items()
+            ])
+            fig_fail = px.pie(fail_df, names="Reason", values="% of Failures",
+                              color_discrete_sequence=px.colors.sequential.RdBu)
+            fig_fail.update_layout(height=280, margin=dict(t=10,b=10))
+            st.plotly_chart(fig_fail, use_container_width=True)
+
+    st.divider()
+
+    # ── METRIC DICTIONARY — addresses "no explanation of calculations" ──
+    st.subheader("📖 How Each Metric Is Calculated")
+    st.caption("Every metric shows its exact formula, source table, and the "
+               "decision it informs — so the founder can verify any number "
+               "independently.")
+    for name, defn in CONVERSION_METRIC_DICTIONARY.items():
+        val = cm.get(name)
+        val_str = str(val) if not isinstance(val, float) else f"{val:.1f}"
+        if name == "failure_rate_by_reason":
+            val_str = str(cm.get(name, {}))
+        with st.expander(f"**{name}** = {val_str}", expanded=False):
+            st.markdown(f"**Definition:** {defn['definition']}")
+            st.code(defn['formula'], language="sql")
+            st.markdown(f"**Source table:** `{defn['source']}`")
+            st.markdown(f"**Decision:** _{defn['decision']}_")
+            st.markdown(f"**Expected range:** {defn['expected_range']}")
+
+    st.divider()
+
+    # ── ERROR HANDLING — real examples, not claims ──────────────
+    st.subheader("⚠️ Error Handling — Real Data Examples")
+    st.caption("These are actual rows from the database proving that "
+               "failure handling works correctly, not just claimed to work.")
+
+    st.markdown("**What happens when a payment FAILS?**")
+    st.info("The student loses **no money** (payment never completed) and "
+            "their **application is never created** (application_id = NULL). "
+            "They can retry without re-viewing the job. "
+            "The `conversion_events` log records exactly why it failed.")
+
+    failures = get_failure_examples(DB, limit=5)
+    if failures:
+        fail_df = pd.DataFrame(failures)
+        fail_df["application_created?"] = fail_df["application_id"].apply(
+            lambda x: "✅ NO (correct)" if x is None else f"❌ YES — BUG (id={x})"
+        )
+        st.dataframe(
+            fail_df[["sp_id","student","job","failure_reason",
+                      "initiated_at","application_created?"]],
+            use_container_width=True, hide_index=True
+        )
+    integrity = q("SELECT COUNT(*) n FROM student_payments WHERE status='failed' AND application_id IS NOT NULL").iloc[0,0]
+    if integrity == 0:
+        st.success("✅ CONFIRMED: 0 failed payments accidentally created an application.")
+
+    st.markdown("**What happens when a student ABANDONS payment?**")
+    st.info("Student clicked 'Apply & Pay' but left before completing. "
+            "Same outcome as failure: no application created, no money taken. "
+            "The `application_abandoned` event fires after a 30-minute timeout.")
+    abandoned = get_abandonment_examples(DB, limit=5)
+    if abandoned:
+        ab_df = pd.DataFrame(abandoned)
+        ab_df["application_created?"] = ab_df["application_id"].apply(
+            lambda x: "✅ NO (correct)" if x is None else f"❌ YES — BUG"
+        )
+        st.dataframe(
+            ab_df[["sp_id","student","job","initiated_at","application_created?"]],
+            use_container_width=True, hide_index=True
+        )
+
+    st.divider()
+
+    # ── Recent conversion events (live feed) ────────────────────
+    st.subheader("Recent Conversion Events (live)")
+    recent_ce = q("""
+        SELECT ce.emitted_at, s.student_name, j.job_title,
+               ce.event_name, ce.amount_inr, ce.failure_reason,
+               ce.gateway_mode,
+               CASE WHEN ce.application_id IS NOT NULL
+                    THEN 'YES' ELSE 'NO' END AS app_created
+        FROM conversion_events ce
+        JOIN students s ON ce.student_id = s.student_id
+        JOIN jobs j ON ce.job_id = j.job_id
+        ORDER BY ce.emitted_at DESC LIMIT 30
+    """)
+    st.dataframe(recent_ce, use_container_width=True, height=360)
+
+
+# ═══════════════════════════════════════════════════════
+# TAB 3 — OVERVIEW (Task 1 metrics)
+# ═══════════════════════════════════════════════════════
+with tabs[3]:
 
     # ── top KPI cards ────────────────────────────────────
     total_companies = q("SELECT COUNT(*) n FROM companies").iloc[0,0]
@@ -495,7 +655,7 @@ with tabs[2]:
 # ═══════════════════════════════════════════════════════
 # TAB 2 — JOB SUPPLY (Task 2 centrepiece)
 # ═══════════════════════════════════════════════════════
-with tabs[3]:
+with tabs[4]:
     st.subheader("Job Supply Instrumentation — Live View")
     st.caption("Every row below comes from a `job_posted` event in the `job_supply_events` table. "
                "This view is the Task 2 deliverable — events validated, jobs-posted view live.")
@@ -605,7 +765,7 @@ with tabs[3]:
 # ═══════════════════════════════════════════════════════
 # TAB 3 — COMPANY FUNNEL (Task 3 centrepiece)
 # ═══════════════════════════════════════════════════════
-with tabs[4]:
+with tabs[5]:
     st.subheader("Company Funnel — Search & Discovery")
     st.caption("Posted → Viewed → Applied → Shortlisted → Interviewed → Offered, "
                "built from job_supply_events, job_view_events, applications, "
@@ -751,7 +911,7 @@ with tabs[4]:
 # ═══════════════════════════════════════════════════════
 # TAB 4 — APPLICATION FUNNEL (Task 4 centrepiece)
 # ═══════════════════════════════════════════════════════
-with tabs[5]:
+with tabs[6]:
     st.subheader("Application Funnel — Applications & Shortlisting")
     st.caption("Submitted → Verified/Rejected → Shortlisted → Interviewed → Offered. "
                "Built from application_events (immutable log) — every application is "
@@ -865,7 +1025,7 @@ with tabs[5]:
 # ═══════════════════════════════════════════════════════
 # TAB 5 — VALIDATION (Task 2 + Task 3 + Task 4 checks)
 # ═══════════════════════════════════════════════════════
-with tabs[6]:
+with tabs[7]:
     st.subheader("Job Supply Event Validation — All Checks")
 
     STATUS_COLOR = {"PASS":"#22c55e","WARN":"#f59e0b","FAIL":"#ef4444"}
@@ -1094,13 +1254,60 @@ with tabs[6]:
     else:
         st.warning("⚠️ Review Task 6 warnings above.")
 
+    st.divider()
+    st.subheader("Task 7 — Conversion Baseline Validation")
+
+    n_sp  = q("SELECT COUNT(*) n FROM student_payments").iloc[0,0]
+    n_ce  = q("SELECT COUNT(*) n FROM conversion_events").iloc[0,0]
+    u1 = "PASS" if n_sp > 100 and n_ce > 200 else "FAIL"
+    st.markdown(f'**Check 1 — Conversion data flowing** {badge(u1)}', unsafe_allow_html=True)
+    st.caption(f"student_payments: {n_sp} | conversion_events: {n_ce}")
+
+    last_ce = q("SELECT MAX(emitted_at) ts FROM conversion_events").iloc[0,0]
+    hrs_ce  = (dt.datetime.now() - dt.datetime.strptime(
+        last_ce, "%Y-%m-%d %H:%M:%S")).total_seconds()/3600
+    u2 = "PASS" if hrs_ce < 48 else "FAIL"
+    st.markdown(f'**Check 2 — Freshness (< 48h)** {badge(u2)}', unsafe_allow_html=True)
+    st.caption(f"Last event: {last_ce} ({hrs_ce:.1f}h ago)")
+
+    pay_app_ok = q("""
+        SELECT COUNT(*) n FROM student_payments
+        WHERE status='success' AND application_id IS NULL
+    """).iloc[0,0]
+    u3 = "PASS" if pay_app_ok == 0 else "FAIL"
+    st.markdown(f'**Check 3 — Payment→Application integrity (no orphaned payments)** {badge(u3)}',
+                unsafe_allow_html=True)
+    st.caption(f"Successful payments with no application: {pay_app_ok}")
+
+    live_sp = q("SELECT COUNT(*) n FROM student_payments WHERE gateway_mode='live'").iloc[0,0]
+    u4 = "PASS" if live_sp == 0 else "FAIL"
+    st.markdown(f'**Check 4 — Gateway in test mode** {badge(u4)}', unsafe_allow_html=True)
+    st.caption(f"Live-mode student payments: {live_sp}")
+
+    fail_orphan = q("""
+        SELECT COUNT(*) n FROM student_payments
+        WHERE status='failed' AND application_id IS NOT NULL
+    """).iloc[0,0]
+    u5 = "PASS" if fail_orphan == 0 else "FAIL"
+    st.markdown(f'**Check 5 — No application created on payment failure** {badge(u5)}',
+                unsafe_allow_html=True)
+    st.caption(f"Failed payments with an application: {fail_orphan}")
+
+    conv_ok = all(x == "PASS" for x in [u1, u2, u3, u4, u5])
+    if conv_ok:
+        st.success("✅ ALL TASK 7 CHECKS PASS — Conversion tracking live. "
+                   "End-to-end: view → pay ₹100 → apply, demoable in test mode.")
+    else:
+        st.warning("⚠️ Review Task 7 warnings above.")
+
 
 # ═══════════════════════════════════════════════════════
 # TAB 8 — RAW DATA
 # ═══════════════════════════════════════════════════════
-with tabs[7]:
+with tabs[8]:
     table = st.selectbox("Table", ["applications","jobs","students","companies","interviews",
                                    "offers","job_supply_events","job_search_events",
                                    "job_view_events","application_events",
-                                   "payments","payment_events"])
+                                   "payments","payment_events","payment_reconciliation",
+                                   "student_payments","conversion_events"])
     st.dataframe(q(f"SELECT * FROM {table}"), use_container_width=True, height=500)

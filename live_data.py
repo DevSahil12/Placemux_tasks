@@ -469,12 +469,16 @@ def seed(n_companies=80, n_jobs=300, n_students=600):
         recon_date = (dt.datetime.now() - dt.timedelta(days=days_back)).strftime("%Y-%m-%d")
         emit_reconciliation(conn, recon_date)
 
+    # Task 7: seed student pay-per-application conversions (800 attempts)
+    seed_student_payments(conn, n=800)
+
     conn.commit()
 
     totals = {}
     for tbl in ["companies","jobs","students","applications","interviews","offers",
                 "job_supply_events","job_search_events","job_view_events",
-                "application_events","payments","payment_events","payment_reconciliation"]:
+                "application_events","payments","payment_events","payment_reconciliation",
+                "student_payments","conversion_events"]:
         totals[tbl] = cur.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
     conn.close()
 
@@ -700,13 +704,182 @@ def emit_reconciliation(conn, recon_date: str = None):
             "our_total": our_total, "discrepancy": discrepancy}
 
 
+# ── TASK 7: Student Pay-per-Application emitters ───────────────────────────
+
+STUDENT_FAILURE_REASONS = [
+    "insufficient_funds", "card_declined", "gateway_timeout",
+    "upi_timeout", "net_banking_error"
+]
+
+
+def emit_student_payment(conn, student_id: int, job_id: int) -> dict:
+    """
+    Fires the complete ₹100 pay-per-application conversion funnel:
+
+    STEP 1: job_viewed          → student opens the job listing
+    STEP 2: pay_per_app_initiated → student clicks "Apply & Pay ₹100"
+    STEP 3: pay_per_app_success OR pay_per_app_failed
+    STEP 4 (success only): application_created → application row inserted
+    STEP 4 (failed): application_abandoned → application NOT created
+
+    KEY RULE (answers self-check Q1):
+    "What happens if payment fails halfway?"
+    → Student loses NOTHING. application_created fires only AFTER
+      pay_per_app_success. A failed payment produces no application row.
+      The student can retry without re-viewing the listing.
+      The conversion_events log always shows what happened and why.
+    """
+    cur = conn.cursor()
+    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    gateway_ref = f"GW-SPA-{random.randint(100000,999999)}"
+
+    # STEP 1: job_viewed
+    cur.execute("""
+        INSERT INTO conversion_events
+            (student_id, job_id, event_name, amount_inr, gateway_mode, emitted_at)
+        VALUES (?, ?, 'job_viewed', 0, 'test', ?)
+    """, (student_id, job_id, now))
+
+    # STEP 2: pay_per_app_initiated
+    cur.execute("""
+        INSERT INTO student_payments
+            (student_id, job_id, amount_inr, gateway_ref, gateway_mode,
+             status, initiated_at)
+        VALUES (?, ?, 100, ?, 'test', 'initiated', ?)
+    """, (student_id, job_id, gateway_ref, now))
+    sp_id = cur.lastrowid
+
+    cur.execute("""
+        INSERT INTO conversion_events
+            (student_id, job_id, sp_id, event_name, amount_inr, gateway_mode, emitted_at)
+        VALUES (?, ?, ?, 'pay_per_app_initiated', 100, 'test', ?)
+    """, (student_id, job_id, sp_id, now))
+
+    # STEP 3: gateway response — 78% success, 12% fail, 10% abandon
+    resolved_at = (dt.datetime.now() + dt.timedelta(
+        seconds=random.randint(2, 8))).strftime("%Y-%m-%d %H:%M:%S")
+    roll = random.random()
+
+    if roll < 0.78:
+        # SUCCESS
+        cur.execute("""
+            UPDATE student_payments
+            SET status='success', resolved_at=? WHERE sp_id=?
+        """, (resolved_at, sp_id))
+        cur.execute("""
+            INSERT INTO conversion_events
+                (student_id, job_id, sp_id, event_name, amount_inr,
+                 gateway_mode, emitted_at)
+            VALUES (?, ?, ?, 'pay_per_app_success', 100, 'test', ?)
+        """, (student_id, job_id, sp_id, resolved_at))
+
+        # STEP 4 SUCCESS: create the application — only after payment confirmed
+        cur.execute("""
+            INSERT INTO applications
+                (student_id, job_id, applied_at, status, verified)
+            VALUES (?, ?, ?, 'Applied',
+                CASE WHEN (SELECT cgpa FROM students WHERE student_id=?)
+                     >= (SELECT min_cgpa FROM jobs WHERE job_id=?)
+                THEN 1 ELSE 0 END)
+        """, (student_id, job_id, resolved_at, student_id, job_id))
+        application_id = cur.lastrowid
+
+        cur.execute("""
+            UPDATE student_payments SET application_id=? WHERE sp_id=?
+        """, (application_id, sp_id))
+        cur.execute("""
+            INSERT INTO conversion_events
+                (student_id, job_id, sp_id, application_id, event_name,
+                 amount_inr, gateway_mode, emitted_at)
+            VALUES (?, ?, ?, ?, 'application_created', 100, 'test', ?)
+        """, (student_id, job_id, sp_id, application_id, resolved_at))
+
+        # also log in application_events for full audit trail
+        company_id = cur.execute(
+            "SELECT company_id FROM jobs WHERE job_id=?", (job_id,)
+        ).fetchone()[0]
+        verified = cur.execute(
+            "SELECT verified FROM applications WHERE application_id=?",
+            (application_id,)
+        ).fetchone()[0]
+        cur.execute("""
+            INSERT INTO application_events
+                (application_id, student_id, job_id, company_id,
+                 event_name, verified, emitted_at)
+            VALUES (?, ?, ?, ?, 'application_submitted', ?, ?)
+        """, (application_id, student_id, job_id, company_id,
+              verified, resolved_at))
+
+        conn.commit()
+        return {"sp_id": sp_id, "status": "success",
+                "application_id": application_id, "failure_reason": None}
+
+    elif roll < 0.90:
+        # FAILURE — application is NOT created
+        failure_reason = random.choice(STUDENT_FAILURE_REASONS)
+        cur.execute("""
+            UPDATE student_payments
+            SET status='failed', failure_reason=?, resolved_at=?
+            WHERE sp_id=?
+        """, (failure_reason, resolved_at, sp_id))
+        cur.execute("""
+            INSERT INTO conversion_events
+                (student_id, job_id, sp_id, event_name, amount_inr,
+                 failure_reason, gateway_mode, emitted_at)
+            VALUES (?, ?, ?, 'pay_per_app_failed', 100, ?, 'test', ?)
+        """, (student_id, job_id, sp_id, failure_reason, resolved_at))
+
+        conn.commit()
+        return {"sp_id": sp_id, "status": "failed",
+                "application_id": None, "failure_reason": failure_reason}
+
+    else:
+        # ABANDONED — student left before completing payment
+        cur.execute("""
+            UPDATE student_payments SET status='abandoned' WHERE sp_id=?
+        """, (sp_id,))
+        cur.execute("""
+            INSERT INTO conversion_events
+                (student_id, job_id, sp_id, event_name, amount_inr,
+                 gateway_mode, emitted_at)
+            VALUES (?, ?, ?, 'application_abandoned', 100, 'test', ?)
+        """, (student_id, job_id, sp_id, resolved_at))
+
+        conn.commit()
+        return {"sp_id": sp_id, "status": "abandoned",
+                "application_id": None, "failure_reason": None}
+
+
+def seed_student_payments(conn, n=800):
+    """Seed student pay-per-application events at realistic scale."""
+    cur = conn.cursor()
+    student_ids = [r[0] for r in cur.execute(
+        "SELECT student_id FROM students ORDER BY RANDOM() LIMIT ?", (n,)
+    ).fetchall()]
+    job_ids = [r[0] for r in cur.execute(
+        "SELECT job_id FROM jobs WHERE status='open' LIMIT 200"
+    ).fetchall()]
+
+    counts = {"success": 0, "failed": 0, "abandoned": 0}
+    for s_id in student_ids:
+        j_id = random.choice(job_ids)
+        result = emit_student_payment(conn, s_id, j_id)
+        counts[result["status"]] = counts.get(result["status"], 0) + 1
+
+    print(f"  student_payments seeded: {n} attempts")
+    print(f"    success: {counts.get('success',0)} | "
+          f"failed: {counts.get('failed',0)} | "
+          f"abandoned: {counts.get('abandoned',0)}")
+
+
 def status():
     conn = get_conn()
     cur  = conn.cursor()
     print("\n=== PlaceMux Live Data Status ===")
     for tbl in ["companies","jobs","students","applications","interviews","offers",
                 "job_supply_events","job_search_events","job_view_events",
-                "application_events","payments","payment_events","payment_reconciliation"]:
+                "application_events","payments","payment_events","payment_reconciliation",
+                "student_payments","conversion_events"]:
         n = cur.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
         print(f"  {tbl:25s} {n:>6d} rows")
     last = cur.execute("SELECT MAX(emitted_at) FROM job_supply_events").fetchone()[0]

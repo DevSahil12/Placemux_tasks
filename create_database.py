@@ -4,6 +4,8 @@ conn = sqlite3.connect("placemux.db")
 cur = conn.cursor()
 
 cur.executescript("""
+DROP TABLE IF EXISTS conversion_events;
+DROP TABLE IF EXISTS student_payments;
 DROP TABLE IF EXISTS payment_reconciliation;
 DROP TABLE IF EXISTS payment_events;
 DROP TABLE IF EXISTS payments;
@@ -199,3 +201,39 @@ CREATE TABLE payment_reconciliation (
 conn.commit()
 conn.close()
 print("Database created with full schema.")
+# Task 7 tables added separately to avoid executescript conflicts
+import sqlite3 as _sqlite3
+_conn = _sqlite3.connect("placemux.db")
+_conn.executescript("""
+DROP TABLE IF EXISTS conversion_events;
+DROP TABLE IF EXISTS student_payments;
+
+CREATE TABLE IF NOT EXISTS student_payments (
+    sp_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id      INTEGER,
+    job_id          INTEGER,
+    application_id  INTEGER,
+    amount_inr      REAL DEFAULT 100,
+    gateway_ref     TEXT,
+    gateway_mode    TEXT DEFAULT 'test',
+    status          TEXT,
+    failure_reason  TEXT,
+    initiated_at    TEXT,
+    resolved_at     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS conversion_events (
+    ce_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id      INTEGER,
+    job_id          INTEGER,
+    sp_id           INTEGER,
+    application_id  INTEGER,
+    event_name      TEXT,
+    amount_inr      REAL,
+    failure_reason  TEXT,
+    gateway_mode    TEXT DEFAULT 'test',
+    emitted_at      TEXT
+);
+""")
+_conn.commit()
+_conn.close()
