@@ -209,3 +209,34 @@ Immutable audit log of every payment status transition. Each payment generates a
 | arpc_inr | payments |
 | failure_reason_breakdown | payment_events |
 | gateway_reconciliation | payment_events (via gateway_ref) |
+
+---
+
+### `receipts` — Entity Table (Task 8)
+**Purpose:** One receipt per successful payment (company or student). The receipt is the customer's proof of payment and the mandatory prerequisite for issuing a refund — no receipt, no refund.
+**Key columns:** `receipt_number` (human-readable e.g. RCP-2026-000001), `payment_source` (company/student), `refund_eligible`
+**Why separate from `payments`?** A receipt is a customer-facing document. Payments are an internal ledger entry. Keeping them separate means receipt formatting, numbering, and delivery can evolve independently of payment logic.
+
+---
+
+### `refunds` — Entity Table (Task 8)
+**Purpose:** Current state of every refund transaction.
+**Key columns:** `reason`, `initiated_by` (system/founder/gateway), `status` (initiated/processed/failed), `amount_inr` (supports partial refunds)
+**Why it exists:** Refunds must be tracked separately from payments because they are debits in the ledger (payments are credits). They also have their own lifecycle: a refund can fail at the gateway even after being initiated.
+
+---
+
+### `refund_events` — Event Log (Task 8)
+**Purpose:** Immutable audit trail — every refund status change fires a row here.
+**Event types:** `refund_initiated`, `refund_processed`, `refund_failed`
+**Why separate from `refunds`?** Same pattern as `payment_events` vs `payments`. If a customer disputes a refund, the event log is the legal record of exactly when each status change happened. The `refunds` table only shows current state.
+
+---
+
+## Summary: Task 8 added 3 tables
+
+| Table | Type | Task 8 Role |
+|---|---|---|
+| `receipts` | Entity | Proof of payment; refund prerequisite |
+| `refunds` | Entity | Refund current state |
+| `refund_events` | Event log | Refund audit trail |

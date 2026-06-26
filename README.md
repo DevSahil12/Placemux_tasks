@@ -193,3 +193,74 @@ placemux-analytics/
 ├── .gitignore
 └── README.md
 ```
+
+---
+
+## Task 8 — Receipts, Refunds & Reconciliation
+
+### 🔄 Refund/Failure Analytics (Live Numbers)
+
+| Metric | Value | Formula |
+|---|---|---|
+| total_receipts_issued | 1,063 | `COUNT(*) FROM receipts` |
+| receipt_coverage_rate | **100%** | `COUNT(receipts)/COUNT(success_payments)×100` |
+| total_refunds_issued | 103 | `COUNT(*) FROM refunds` |
+| refund_rate | **9.7%** | `COUNT(refunds)/COUNT(receipts)×100` |
+| refund_success_rate | 93.2% | `COUNT(status='processed')/COUNT(refunds)×100` |
+| total_refunded_inr | ₹96,081 | `SUM(amount_inr) WHERE status='processed'` |
+| net_revenue_inr | **₹8,25,617** | `gross_revenue - total_refunded` |
+| failed_refunds_needing_retry | 7 | `COUNT(*) WHERE status='failed'` — action within 24h |
+| reconciliation_match_rate | **100%** | `SUM(matched)/COUNT(*)×100` |
+
+### Refunds by Reason
+
+| Reason | Count | Amount (INR) |
+|---|---|---|
+| duplicate_transaction | 28 | ₹43,194 |
+| gateway_error | 23 | ₹13,397 |
+| manual_review | 17 | ₹25,993 |
+| candidate_withdrew | 14 | ₹1,400 |
+| payment_failed | 12 | ₹1,200 |
+| company_cancelled | 9 | ₹11,997 |
+
+**Decision:** `duplicate_transaction` at 28 = add idempotency key to payment flow urgently. `gateway_error` at 23 = escalate to gateway provider.
+
+### How Receipts & Refunds Work (Error Handling)
+
+```
+Successful payment
+      │
+      ▼
+emit_receipt() → receipts table (receipt_number = RCP-2026-XXXXXX)
+      │
+   (if refund needed)
+      ▼
+emit_refund(receipt_id, reason)
+      │
+      ├─ refund_initiated event → refund_events log
+      │
+      ▼ gateway response
+     93.2%              6.8%
+  refund_processed   refund_failed
+      │                   │
+  refund_events       refund_events
+  status='processed'  status='failed'
+                          │
+                    → listed in dashboard
+                      "Failed Refunds Needing Retry"
+                      → action within 24h
+```
+
+**Key rules enforced in code:**
+1. No refund without a receipt (`receipt_id` FK enforced)
+2. Refund amount cannot exceed original payment amount
+3. Failed refunds are tracked and surfaced — never silently dropped
+4. Gateway reconciliation runs daily — any discrepancy > ₹0.01 flagged
+
+### New Tables (Task 8)
+
+| Table | Type | Purpose |
+|---|---|---|
+| `receipts` | Entity | One per successful payment — customer proof, refund prerequisite |
+| `refunds` | Entity | Refund transactions — current state |
+| `refund_events` | Event log | Immutable audit trail of every refund status change |

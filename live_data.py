@@ -472,13 +472,17 @@ def seed(n_companies=80, n_jobs=300, n_students=600):
     # Task 7: seed student pay-per-application conversions (800 attempts)
     seed_student_payments(conn, n=800)
 
+    # Task 8: issue receipts for all successful payments + refunds for a subset
+    seed_receipts_and_refunds(conn)
+
     conn.commit()
 
     totals = {}
     for tbl in ["companies","jobs","students","applications","interviews","offers",
                 "job_supply_events","job_search_events","job_view_events",
                 "application_events","payments","payment_events","payment_reconciliation",
-                "student_payments","conversion_events"]:
+                "student_payments","conversion_events",
+                "receipts","refunds","refund_events"]:
         totals[tbl] = cur.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
     conn.close()
 
@@ -872,6 +876,198 @@ def seed_student_payments(conn, n=800):
           f"abandoned: {counts.get('abandoned',0)}")
 
 
+# ── TASK 8: Receipts, Refunds & Reconciliation emitters ───────────────────
+
+REFUND_REASONS = [
+    "payment_failed",       # gateway charged but never confirmed — auto-refund
+    "duplicate_transaction",# student/company paid twice — auto-refund the second
+    "candidate_withdrew",   # student withdrew application after paying
+    "company_cancelled",    # company cancelled the job after being billed
+    "gateway_error",        # gateway processing error flagged post-settlement
+    "manual_review",        # founder or support team issued manual refund
+]
+
+
+def emit_receipt(conn, payment_source: str, payment_id: int,
+                 payer_id: int, amount_inr: float,
+                 payment_type: str, gateway_ref: str,
+                 issued_at: str) -> int:
+    """
+    Issues a receipt for every successful payment.
+    Formula: one receipt per successful payment — no receipt without a payment,
+    no refund without a receipt.
+    Source: payments WHERE status='success' OR student_payments WHERE status='success'
+    Decision: receipt_count should always equal successful payment count.
+    Any gap = a receipt generation bug → customer has paid but has no proof.
+    """
+    cur = conn.cursor()
+    # generate human-readable receipt number
+    seq = cur.execute("SELECT COUNT(*) FROM receipts").fetchone()[0] + 1
+    receipt_number = f"RCP-2026-{seq:06d}"
+
+    cur.execute("""
+        INSERT INTO receipts
+            (receipt_number, payment_source, payment_id, payer_id,
+             amount_inr, payment_type, gateway_ref, issued_at, refund_eligible)
+        VALUES (?,?,?,?,?,?,?,?,1)
+    """, (receipt_number, payment_source, payment_id,
+          payer_id, amount_inr, payment_type, gateway_ref, issued_at))
+    receipt_id = cur.lastrowid
+    conn.commit()
+    return receipt_id
+
+
+def emit_refund(conn, receipt_id: int, reason: str,
+                partial_amount: float = None,
+                initiated_by: str = "system") -> dict:
+    """
+    Issues a refund against a receipt.
+
+    KEY RULES (answers self-check Q1):
+    1. A refund can ONLY be issued if a receipt exists (no receipt = no refund).
+    2. The refund amount cannot exceed the original payment amount.
+    3. Every refund fires refund_initiated → refund_processed/refund_failed to the
+       refund_events audit log — never just updating a field silently.
+    4. If a refund fails (gateway error), the receipt remains valid and
+       a refund_failed event fires — the refund must be retried manually.
+    5. Partial refunds are supported (partial_amount < receipt.amount_inr).
+
+    Source: refunds table + refund_events
+    Decision: rising refund rate by reason tells you what to fix —
+              'company_cancelled' spike → review job posting commitment policy.
+    """
+    cur = conn.cursor()
+    receipt = cur.execute(
+        "SELECT amount_inr, refund_eligible, payer_id, payment_source, "
+        "       payment_type, gateway_ref FROM receipts WHERE receipt_id=?",
+        (receipt_id,)
+    ).fetchone()
+    if not receipt:
+        return {"status": "error", "reason": "receipt_not_found"}
+    if not receipt[1]:
+        return {"status": "error", "reason": "receipt_not_refund_eligible"}
+
+    amount = partial_amount if partial_amount else receipt[0]
+    if amount > receipt[0]:
+        amount = receipt[0]  # cap at original amount
+
+    gateway_ref = f"GW-REF-{random.randint(100000,999999)}"
+    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    cur.execute("""
+        INSERT INTO refunds
+            (receipt_id, payment_source, payer_id, amount_inr, reason,
+             initiated_by, status, gateway_ref, initiated_at)
+        VALUES (?,?,?,?,?,?,'initiated',?,?)
+    """, (receipt_id, receipt[3], receipt[2], amount,
+          reason, initiated_by, gateway_ref, now))
+    refund_id = cur.lastrowid
+
+    # refund_initiated event
+    cur.execute("""
+        INSERT INTO refund_events
+            (refund_id, receipt_id, event_name, amount_inr, reason, gateway_ref, emitted_at)
+        VALUES (?,?, 'refund_initiated', ?,?,?,?)
+    """, (refund_id, receipt_id, amount, reason, gateway_ref, now))
+
+    # gateway response — 93% process, 7% fail
+    processed_at = (dt.datetime.now() + dt.timedelta(
+        seconds=random.randint(1, 5))).strftime("%Y-%m-%d %H:%M:%S")
+
+    if random.random() < 0.93:
+        cur.execute("""
+            UPDATE refunds SET status='processed', processed_at=?
+            WHERE refund_id=?
+        """, (processed_at, refund_id))
+        cur.execute("""
+            INSERT INTO refund_events
+                (refund_id, receipt_id, event_name, amount_inr,
+                 reason, gateway_ref, emitted_at)
+            VALUES (?,?, 'refund_processed', ?,?,?,?)
+        """, (refund_id, receipt_id, amount, reason, gateway_ref, processed_at))
+        status = "processed"
+    else:
+        cur.execute("""
+            UPDATE refunds SET status='failed', processed_at=? WHERE refund_id=?
+        """, (processed_at, refund_id))
+        cur.execute("""
+            INSERT INTO refund_events
+                (refund_id, receipt_id, event_name, amount_inr,
+                 reason, gateway_ref, emitted_at)
+            VALUES (?,?, 'refund_failed', ?,?,?,?)
+        """, (refund_id, receipt_id, amount, reason, gateway_ref, processed_at))
+        status = "failed"
+
+    conn.commit()
+    return {"refund_id": refund_id, "receipt_id": receipt_id,
+            "amount": amount, "status": status, "reason": reason}
+
+
+def seed_receipts_and_refunds(conn):
+    """
+    Seed receipts for all successful payments (company + student),
+    then issue refunds for a realistic subset of them.
+    """
+    cur = conn.cursor()
+    receipt_count = 0
+
+    # receipts for company payments (Task 6)
+    company_pays = cur.execute("""
+        SELECT p.payment_id, p.company_id, p.amount_inr, p.payment_type,
+               p.gateway_ref, p.resolved_at
+        FROM payments p WHERE p.status='success'
+    """).fetchall()
+    company_receipt_ids = []
+    for pid, cid, amt, ptype, gref, resolved in company_pays:
+        rid = emit_receipt(conn, "company", pid, cid, amt, ptype, gref, resolved)
+        company_receipt_ids.append((rid, amt, ptype))
+        receipt_count += 1
+
+    # receipts for student payments (Task 7)
+    student_pays = cur.execute("""
+        SELECT sp.sp_id, sp.student_id, sp.amount_inr, sp.gateway_ref, sp.resolved_at
+        FROM student_payments sp WHERE sp.status='success'
+    """).fetchall()
+    student_receipt_ids = []
+    for spid, sid, amt, gref, resolved in student_pays:
+        rid = emit_receipt(conn, "student", spid, sid, amt,
+                           "per_application", gref, resolved)
+        student_receipt_ids.append((rid, amt))
+        receipt_count += 1
+
+    print(f"  receipts issued: {receipt_count}")
+
+    # Refunds — realistic subset
+    refund_count = 0
+
+    # ~8% of company payments get refunded
+    refund_company = random.sample(
+        company_receipt_ids, k=max(1, int(len(company_receipt_ids)*0.08)))
+    company_reasons = ["company_cancelled", "duplicate_transaction",
+                       "gateway_error", "manual_review"]
+    for rid, amt, ptype in refund_company:
+        result = emit_refund(conn, rid,
+                             reason=random.choice(company_reasons),
+                             initiated_by=random.choice(["system","founder"]))
+        if result.get("refund_id"):
+            refund_count += 1
+
+    # ~12% of student payments get refunded (higher — candidate_withdrew is common)
+    refund_student = random.sample(
+        student_receipt_ids, k=max(1, int(len(student_receipt_ids)*0.12)))
+    student_reasons = ["candidate_withdrew", "payment_failed",
+                       "duplicate_transaction", "gateway_error"]
+    for rid, amt in refund_student:
+        result = emit_refund(conn, rid,
+                             reason=random.choice(student_reasons),
+                             initiated_by=random.choice(["system","founder","gateway"]))
+        if result.get("refund_id"):
+            refund_count += 1
+
+    print(f"  refunds issued  : {refund_count}")
+    print(f"  refund_events   : {cur.execute('SELECT COUNT(*) FROM refund_events').fetchone()[0]}")
+
+
 def status():
     conn = get_conn()
     cur  = conn.cursor()
@@ -879,7 +1075,8 @@ def status():
     for tbl in ["companies","jobs","students","applications","interviews","offers",
                 "job_supply_events","job_search_events","job_view_events",
                 "application_events","payments","payment_events","payment_reconciliation",
-                "student_payments","conversion_events"]:
+                "student_payments","conversion_events",
+                "receipts","refunds","refund_events"]:
         n = cur.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
         print(f"  {tbl:25s} {n:>6d} rows")
     last = cur.execute("SELECT MAX(emitted_at) FROM job_supply_events").fetchone()[0]

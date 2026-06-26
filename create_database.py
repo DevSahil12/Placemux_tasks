@@ -237,3 +237,68 @@ CREATE TABLE IF NOT EXISTS conversion_events (
 """)
 _conn.commit()
 _conn.close()
+
+# ── TASK 8: Receipts, Refunds & Reconciliation ────────────────────────────
+import sqlite3 as _s8
+_c8 = _s8.connect("placemux.db")
+_c8.executescript("""
+DROP TABLE IF EXISTS refund_events;
+DROP TABLE IF EXISTS refunds;
+DROP TABLE IF EXISTS receipts;
+
+-- receipts: one row per successful payment (company or student).
+-- Every payment that completes generates a receipt immediately.
+-- A receipt is the customer's proof of payment — it must exist before
+-- we can issue a refund, and its receipt_number is what we log in refunds.
+CREATE TABLE receipts (
+    receipt_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    receipt_number   TEXT UNIQUE,          -- human-readable e.g. RCP-2026-000001
+    payment_source   TEXT,                 -- 'company' (Task 6) | 'student' (Task 7)
+    payment_id       INTEGER,              -- FK to payments or student_payments
+    payer_id         INTEGER,              -- company_id or student_id
+    amount_inr       REAL,
+    payment_type     TEXT,
+    gateway_ref      TEXT,
+    issued_at        TEXT,
+    refund_eligible  INTEGER DEFAULT 1     -- 1 = can be refunded, 0 = non-refundable
+);
+
+-- refunds: one row per refund issued, always linked back to a receipt.
+-- The refund table is separate from the payment table because:
+--   1) A refund is a different event (debit vs credit in the ledger)
+--   2) Partial refunds are possible (future: pro-rata subscription)
+--   3) Reconciliation needs to diff payments vs refunds independently
+CREATE TABLE refunds (
+    refund_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    receipt_id       INTEGER,              -- must link to a valid receipt
+    payment_source   TEXT,
+    payer_id         INTEGER,
+    amount_inr       REAL,                 -- actual refund amount (can be partial)
+    reason           TEXT,                 -- payment_failed | duplicate | candidate_withdrew |
+                                           -- company_cancelled | gateway_error | manual_review
+    initiated_by     TEXT,                 -- 'system' | 'founder' | 'gateway'
+    status           TEXT,                 -- initiated | processed | failed
+    gateway_ref      TEXT,
+    initiated_at     TEXT,
+    processed_at     TEXT,
+    FOREIGN KEY (receipt_id) REFERENCES receipts(receipt_id)
+);
+
+-- refund_events: immutable audit trail for every refund status change.
+-- Same pattern as payment_events: the refunds table holds current state,
+-- this table holds the auditable history.
+CREATE TABLE refund_events (
+    re_id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    refund_id        INTEGER,
+    receipt_id       INTEGER,
+    event_name       TEXT,                 -- refund_initiated | refund_processed | refund_failed
+    amount_inr       REAL,
+    reason           TEXT,
+    gateway_ref      TEXT,
+    emitted_at       TEXT,
+    FOREIGN KEY (refund_id)  REFERENCES refunds(refund_id),
+    FOREIGN KEY (receipt_id) REFERENCES receipts(receipt_id)
+);
+""")
+_c8.commit()
+_c8.close()
