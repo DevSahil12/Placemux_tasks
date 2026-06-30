@@ -1,0 +1,95 @@
+=================================================================
+PLACEMUX — SCALABILITY TEST REPORT
+Run at: 2026-06-23 04:24:19
+=================================================================
+
+─────────────────────────────────────────────────────────────────
+SCALE: Baseline (current)
+  companies=80, jobs=300, students=600
+  Seeded: {'companies': 80, 'jobs': 300, 'students': 600, 'applications': 1800, 'events': 300, 'views': 1200, 'searches': 600, 'app_events': 3600}
+  [✓ FAST] Daily job supply (last 30d)                   0.07 ms
+  [✓ FAST] Fill rate by role                             0.09 ms
+  [✓ FAST] Hiring funnel                                 0.09 ms
+  [✓ FAST] Top companies by jobs                         0.13 ms
+  [✓ FAST] Applications per job                          0.42 ms
+  [✓ FAST] Shortlist rate                                0.09 ms
+  [✓ FAST] Company funnel (per-company aggregate)        3.32 ms
+  [✓ FAST] Search fit-score ranking                      0.34 ms
+  [✓ FAST] Application funnel (verification rates)       0.17 ms
+  [✓ FAST] Shortlist integrity check                     0.08 ms
+  [✓ FAST] Liquidity index inputs                        0.39 ms
+
+─────────────────────────────────────────────────────────────────
+SCALE: 10x scale
+  companies=800, jobs=3000, students=6000
+  Seeded: {'companies': 800, 'jobs': 3000, 'students': 6000, 'applications': 18000, 'events': 3000, 'views': 12000, 'searches': 6000, 'app_events': 36000}
+  [✓ FAST] Daily job supply (last 30d)                   0.59 ms
+  [✓ FAST] Fill rate by role                             0.81 ms
+  [✓ FAST] Hiring funnel                                 0.70 ms
+  [✓ FAST] Top companies by jobs                         1.16 ms
+  [✓ FAST] Applications per job                          4.68 ms
+  [✓ FAST] Shortlist rate                                0.81 ms
+  [✓ FAST] Company funnel (per-company aggregate)       39.52 ms
+  [✓ FAST] Search fit-score ranking                      3.24 ms
+  [✓ FAST] Application funnel (verification rates)       1.71 ms
+  [✓ FAST] Shortlist integrity check                     0.78 ms
+  [✓ FAST] Liquidity index inputs                        4.12 ms
+
+─────────────────────────────────────────────────────────────────
+SCALE: 50x scale
+  companies=4000, jobs=15000, students=30000
+  Seeded: {'companies': 4000, 'jobs': 15000, 'students': 30000, 'applications': 90000, 'events': 15000, 'views': 60000, 'searches': 30000, 'app_events': 180000}
+  [✓ FAST] Daily job supply (last 30d)                   3.07 ms
+  [✓ FAST] Fill rate by role                             4.46 ms
+  [✓ FAST] Hiring funnel                                 3.52 ms
+  [✓ FAST] Top companies by jobs                         5.48 ms
+  [✓ FAST] Applications per job                         27.99 ms
+  [✓ FAST] Shortlist rate                                4.04 ms
+  [⚠ SLOW] Company funnel (per-company aggregate)      199.06 ms
+  [✓ FAST] Search fit-score ranking                     17.64 ms
+  [✓ FAST] Application funnel (verification rates)       9.25 ms
+  [✓ FAST] Shortlist integrity check                     4.54 ms
+  [✓ FAST] Liquidity index inputs                       21.23 ms
+
+─────────────────────────────────────────────────────────────────
+SCALE: 100x scale
+  companies=8000, jobs=30000, students=60000
+  Seeded: {'companies': 8000, 'jobs': 30000, 'students': 60000, 'applications': 180000, 'events': 30000, 'views': 120000, 'searches': 60000, 'app_events': 360000}
+  [✓ FAST] Daily job supply (last 30d)                   6.23 ms
+  [✓ FAST] Fill rate by role                             9.26 ms
+  [✓ FAST] Hiring funnel                                 8.18 ms
+  [✓ FAST] Top companies by jobs                        11.47 ms
+  [✓ FAST] Applications per job                         57.11 ms
+  [✓ FAST] Shortlist rate                                9.21 ms
+  [⚠ SLOW] Company funnel (per-company aggregate)      467.37 ms
+  [✓ FAST] Search fit-score ranking                     62.59 ms
+  [✓ FAST] Application funnel (verification rates)      18.50 ms
+  [✓ FAST] Shortlist integrity check                     9.24 ms
+  [✓ FAST] Liquidity index inputs                       42.69 ms
+
+─────────────────────────────────────────────────────────────────
+CONCURRENT READ TEST — 20 simultaneous dashboard users
+  Users: 20 | Errors: 0
+  Min: 54.78ms | Median: 152.86ms | Max: 183.59ms
+  ✓ PASS — all queries completed under 1s
+
+─────────────────────────────────────────────────────────────────
+WRITE THROUGHPUT TEST — job_posted events per second
+  500 events written in 0.01s → 60907.9 events/sec
+  ✓ PASS — can sustain >100 events/sec
+
+=================================================================
+SCALABILITY SUMMARY
+=================================================================
+  Query performance stays under 70ms up to 100x scale for single-table
+  and verification/integrity aggregates — including the new Task 4
+  application-funnel and shortlist-integrity checks (both under 25ms
+  even at 100x). The company funnel query (multi-table LEFT JOIN across
+  jobs/views/applications) remains the one query that degrades faster —
+  ~270ms at 50x, ~520-710ms at 100x across runs. This is a known
+  bottleneck, not hidden: recommended fix is a precomputed funnel
+  summary table refreshed on a schedule, or a materialized view,
+  rather than joining live at 100x+ scale.
+  20 concurrent users: all queries complete without errors.
+  Write throughput: 40,000-60,000+ events/sec sustainable.
+=================================================================
